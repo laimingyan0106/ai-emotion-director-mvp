@@ -69,3 +69,21 @@ docker compose up --build
 3. 给出 v1.1 的可测试开发计划；
 4. 在我确认后从第一项开始实现，不要重写已经工作的 MVP。
 ```
+
+## v1.1 增量开发状态
+
+### V11-T001：建立 v1.1 基线与回归保护
+
+- 状态：完成
+- v1.0 公开仓库基线 SHA：`198c56404c5928d2cb75222ca0146668f3098416`
+- 新增最小 GitHub Actions CI：推送至 `main` 或创建 Pull Request 时执行前端构建/测试、ESLint 和后端领域测试。
+- 验证结果：
+  - `npm test`：PASS（2/2）
+  - `npm run lint`：PASS
+  - `python -m unittest discover -s backend/tests -v`：PASS（2/2）
+- 数据库迁移：无
+- API 变更：无
+- 页面与功能改动：无
+- GitHub Actions 验收：前端与后端两个 Job 均已实际运行通过；工作流 Action 已使用当前 v7 主版本，避免旧 Node.js Action 运行时弃用警告。
+- 已知风险：当前测试仍仅覆盖 v1.0 的 SSR 与纯领域逻辑，尚未包含数据库和浏览器 E2E。
+- 下一任务：`V11-T002`，部署可访问的 FastAPI 服务并通过 `NEXT_PUBLIC_API_BASE_URL` 打通前端；不得删除 Demo Adapter。
