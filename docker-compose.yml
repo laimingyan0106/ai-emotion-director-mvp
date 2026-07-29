@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: emotion_director
+      POSTGRES_USER: emotion
+      POSTGRES_PASSWORD: emotion
+    ports:
+      - "5432:5432"
+    volumes:
+      - emotion_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emotion -d emotion_director"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://emotion:emotion@postgres:5432/emotion_director
+      CORS_ORIGINS: http://localhost:3000
+      MEDIA_ROOT: /data/media
+      ADAPTER_MODE: demo
+    ports:
+      - "8000:8000"
+    volumes:
+      - emotion_media:/data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  emotion_pgdata:
+  emotion_media:
