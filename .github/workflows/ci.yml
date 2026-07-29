@@ -47,7 +47,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
       - name: Run backend tests
         env:
           PYTHONPATH: backend
+          STORAGE_MODE: sqlite
         run: python -m unittest discover -s backend/tests -v

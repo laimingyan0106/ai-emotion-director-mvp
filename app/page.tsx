@@ -1,8 +1,17 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ApiError,
+  checkHealth,
+  createProject,
+  fetchProject,
+  getApiMode,
+  uploadAudio,
+} from "../lib/api-client";
 
 type Stage = "idle" | "analyzing" | "ready" | "rendering";
+type ConnectionState = "demo" | "checking" | "real" | "error";
 type View =
   | "dashboard"
   | "world"
@@ -172,7 +181,38 @@ export default function Home() {
   const [activeShot, setActiveShot] = useState(0);
   const [toast, setToast] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [connection, setConnection] = useState<ConnectionState>(() => getApiMode() === "real" ? "checking" : "demo");
+  const [apiError, setApiError] = useState("");
+  const [apiProjectId, setApiProjectId] = useState("");
+  const [remoteAudio, setRemoteAudio] = useState<{ filename: string; size_bytes: number } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (getApiMode() === "demo") return;
+    const projectId = new URLSearchParams(window.location.search).get("project_id");
+    const connect = async () => {
+      try {
+        if (projectId) {
+          const project = await fetchProject(projectId);
+          setProjectName(project.name);
+          setApiProjectId(project.id);
+          setRemoteAudio(project.audio);
+          if (project.audio) {
+            setStage("ready");
+            setProgress(100);
+          }
+        } else {
+          await checkHealth();
+        }
+        setConnection("real");
+        setApiError("");
+      } catch (error) {
+        setConnection("error");
+        setApiError(error instanceof ApiError ? error.message : "导演 API 暂时不可用。");
+      }
+    };
+    void connect();
+  }, []);
 
   const completedStage = Math.min(stages.length, Math.floor((progress / 100) * stages.length));
   const statusText = stage === "idle" ? "等待素材" : stage === "analyzing" ? `导演处理中 ${progress}%` : stage === "rendering" ? "渲染中" : "方案已生成";
@@ -186,6 +226,7 @@ export default function Home() {
       return;
     }
     setFile(candidate);
+    setRemoteAudio(null);
     setProjectName(candidate.name.replace(/\.[^.]+$/, "") || "未命名项目");
     setStage("idle");
     setProgress(0);
@@ -206,11 +247,7 @@ export default function Home() {
     window.setTimeout(() => setToast(""), 2200);
   }
 
-  function generate() {
-    if (!file) {
-      showToast("先上传一首歌，或载入示例工程");
-      return;
-    }
+  function runDemoPipeline() {
     setStage("analyzing");
     setProgress(4);
     const timer = window.setInterval(() => {
@@ -224,6 +261,40 @@ export default function Home() {
         return next;
       });
     }, 160);
+  }
+
+  async function generate() {
+    if (!file) {
+      showToast("先上传一首歌，或载入示例工程");
+      return;
+    }
+    if (getApiMode() === "demo") {
+      runDemoPipeline();
+      return;
+    }
+
+    setStage("analyzing");
+    setProgress(8);
+    setApiError("");
+    try {
+      const project = await createProject(projectName, 30);
+      setProgress(42);
+      const uploaded = await uploadAudio(project.id, file);
+      setProgress(68);
+      setApiProjectId(project.id);
+      setRemoteAudio({ filename: uploaded.filename, size_bytes: uploaded.size });
+      setConnection("real");
+      const url = new URL(window.location.href);
+      url.searchParams.set("project_id", project.id);
+      window.history.replaceState({}, "", url);
+      showToast("项目与音频已保存到真实 API");
+      runDemoPipeline();
+    } catch (error) {
+      setStage("idle");
+      setProgress(0);
+      setConnection("error");
+      setApiError(error instanceof ApiError ? error.message : "项目上传失败，请稍后重试。");
+    }
   }
 
   function loadDemo() {
@@ -289,7 +360,10 @@ export default function Home() {
         </nav>
         <div className="rail-note">
           <span className="pulse" />
-          <div><strong>Demo Adapter</strong><small>无需模型密钥即可运行</small></div>
+          <div>
+            <strong>{connection === "real" ? "Real API" : connection === "checking" ? "API 连接中" : connection === "error" ? "API 离线" : "Demo Adapter"}</strong>
+            <small>{connection === "real" ? `项目 ${apiProjectId.slice(0, 8) || "待创建"}` : connection === "error" ? "可检查网络后重试" : "无需模型密钥即可运行"}</small>
+          </div>
         </div>
         <p className="version">MVP v1.0 · DIRECTOR CORE</p>
       </aside>
@@ -305,6 +379,7 @@ export default function Home() {
 
         {view === "dashboard" && (
           <div className="page dashboard-page">
+            {apiError && <div className="api-error" role="alert">{apiError}</div>}
             <section className="hero">
               <div className="eyebrow"><span>AI DIRECTING SYSTEM</span><i /></div>
               <h1>把一首歌，<br />变成一个<span>可拍摄的世界。</span></h1>
@@ -321,10 +396,10 @@ export default function Home() {
                 <div className="card-index">SOURCE / 01</div>
                 <button className="upload-zone" onClick={() => fileInput.current?.click()}>
                   <span className="record-icon"><i /></span>
-                  {file ? (
+                  {file || remoteAudio ? (
                     <>
-                      <strong>{file.name}</strong>
-                      <small>{(file.size / 1024 / 1024).toFixed(2)} MB · AUDIO READY</small>
+                      <strong>{file?.name || remoteAudio?.filename}</strong>
+                      <small>{((file?.size || remoteAudio?.size_bytes || 0) / 1024 / 1024).toFixed(2)} MB · {remoteAudio ? "API SAVED" : "AUDIO READY"}</small>
                     </>
                   ) : (
                     <>
@@ -345,12 +420,12 @@ export default function Home() {
               <section className="analysis-card">
                 <div className="card-index">MUSIC DNA / 02</div>
                 <div className="metric-row">
-                  <div><small>BPM</small><strong>{file ? "112" : "—"}</strong></div>
-                  <div><small>KEY</small><strong>{file ? "D min" : "—"}</strong></div>
-                  <div><small>ENERGY</small><strong>{file ? "74%" : "—"}</strong></div>
+                  <div><small>BPM</small><strong>{file || remoteAudio ? "112" : "—"}</strong></div>
+                  <div><small>KEY</small><strong>{file || remoteAudio ? "D min" : "—"}</strong></div>
+                  <div><small>ENERGY</small><strong>{file || remoteAudio ? "74%" : "—"}</strong></div>
                 </div>
-                {file ? <EmotionCurve /> : <div className="empty-curve"><span>等待音频分析</span></div>}
-                <div className="mood-line"><span>主情绪</span><strong>{file ? "克制的思念" : "—"}</strong></div>
+                {file || remoteAudio ? <EmotionCurve /> : <div className="empty-curve"><span>等待音频分析</span></div>}
+                <div className="mood-line"><span>主情绪</span><strong>{file || remoteAudio ? "克制的思念" : "—"}</strong></div>
               </section>
             </div>
 

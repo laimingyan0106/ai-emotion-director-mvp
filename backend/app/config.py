@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,6 +10,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://emotion:emotion@localhost:5432/emotion_director"
     media_root: Path = Path("./media")
     cors_origins: str = "http://localhost:3000"
+    cors_origin_regex: str = r"https://.*\.(?:chatgpt\.site|vercel\.app)"
+    storage_mode: str = "auto"
+    sqlite_path: Path = Path("./.data/emotion-director.db")
     adapter_mode: str = "demo"
     llm_api_key: str | None = None
     image_api_key: str | None = None
@@ -19,6 +23,24 @@ class Settings(BaseSettings):
     @property
     def allowed_origins(self) -> list[str]:
         return [value.strip() for value in self.cors_origins.split(",") if value.strip()]
+
+    @property
+    def resolved_storage_mode(self) -> str:
+        if self.storage_mode != "auto":
+            return self.storage_mode
+        return "sqlite" if os.getenv("VERCEL") else "postgres"
+
+    @property
+    def resolved_media_root(self) -> Path:
+        if os.getenv("VERCEL") and self.media_root == Path("./media"):
+            return Path("/tmp/emotion-director-media")
+        return self.media_root
+
+    @property
+    def resolved_sqlite_path(self) -> Path:
+        if os.getenv("VERCEL") and self.sqlite_path == Path("./.data/emotion-director.db"):
+            return Path("/tmp/emotion-director.db")
+        return self.sqlite_path
 
 
 @lru_cache

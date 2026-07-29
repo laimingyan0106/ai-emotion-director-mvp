@@ -41,3 +41,14 @@ class UploadResponse(BaseModel):
     filename: str
     size: int
     status: str
+
+
+class AudioSummary(BaseModel):
+    id: UUID
+    filename: str
+    content_type: str | None = None
+    size_bytes: int
+
+
+class ProjectSnapshot(ProjectResponse):
+    audio: AudioSummary | None = None

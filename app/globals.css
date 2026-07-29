@@ -281,3 +281,13 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+.api-error {
+  margin: 0 0 18px;
+  padding: 12px 16px;
+  border: 1px solid rgba(239, 116, 116, 0.45);
+  border-radius: 10px;
+  background: rgba(116, 30, 30, 0.24);
+  color: #ffc7c7;
+  font-size: 13px;
+  line-height: 1.6;
+}

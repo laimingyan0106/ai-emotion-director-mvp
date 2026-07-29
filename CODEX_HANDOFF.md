@@ -87,3 +87,29 @@ docker compose up --build
 - GitHub Actions 验收：前端与后端两个 Job 均已实际运行通过；工作流 Action 已使用当前 v7 主版本，避免旧 Node.js Action 运行时弃用警告。
 - 已知风险：当前测试仍仅覆盖 v1.0 的 SSR 与纯领域逻辑，尚未包含数据库和浏览器 E2E。
 - 下一任务：`V11-T002`，部署可访问的 FastAPI 服务并通过 `NEXT_PUBLIC_API_BASE_URL` 打通前端；不得删除 Demo Adapter。
+
+### V11-T002：部署可访问的 FastAPI 服务并打通前端
+
+- 状态：完成
+- 公开前端：`https://ai-emotion-director-web.vercel.app`
+- Sites 版本（工作区登录访问）：`https://ai-emotion-director-0729.nonkxybee.chatgpt.site`
+- 公开 FastAPI：`https://ai-emotion-director-api.vercel.app`
+- 前端配置：`NEXT_PUBLIC_API_BASE_URL=https://ai-emotion-director-api.vercel.app`
+- 新增类型化 API 客户端、健康检查、Real API / Demo / 离线状态提示。
+- 真实 API 模式支持创建项目、上传音频，并把 `project_id` 写入网址；刷新后通过 `GET /project/{project_id}` 回读项目与音频摘要。
+- 未配置 API 地址时保留完整 Demo Adapter，不需要模型密钥。
+- API 变更：
+  - 新增 `GET /project/{project_id}`
+  - `GET /health` 增加 `storage` 与 `durable_storage`
+- 验证结果：
+  - `npm test`：PASS（2/2）
+  - `npm run lint`：PASS
+  - `python -m unittest discover -s backend/tests -v`：PASS（3/3）
+  - GitHub Actions：前端、后端 Job 均 PASS
+  - 生产 API：创建项目、上传音频、GET 回读 PASS
+  - 生产浏览器：Real API 健康状态、选择音频、创建项目、上传音频、网址写入 `project_id`、刷新回读 `API SAVED` 均 PASS
+  - 断线提示：实际 CORS 断连时页面显示 `API 离线` 与明确错误信息；补齐 Vercel 域名 CORS 后恢复为 `Real API`
+- 当前托管存储：临时 SQLite + `/tmp` 媒体目录。它满足 T002 的联网与刷新回读验收，但不保证跨实例持久化。
+- 当前公开前端是由 vinext 生产构建预渲染得到的静态 Vercel 部署；Sites 工作区禁止公开发布，因此 Sites 版本继续保留为登录访问。
+- 已知风险：Vercel 实例重启或请求落到其他实例时，临时数据可能不可见；严禁把它视为正式用户数据存储。
+- 下一任务：`V11-T003`，接入正式数据库与对象存储，完成项目列表、详情、编辑、删除、自动保存和跨设备持久化。
