@@ -17,7 +17,7 @@ https://ai-emotion-director-0729.nonkxybee.chatgpt.site
 - AI 接口：`DirectorAdapter` 抽象及确定性 `DemoDirectorAdapter`。
 - 页面：导演台、世界观、角色资产、故事板、镜头时间线、渲染队列。
 - 输出：10 个三秒镜头，总时长 30 秒；可导出完整 JSON 方案。
-- Git 历史按原手册保留 T001–T010 开发记录。
+- 当前本地工作区保留 T001–T010 完整开发记录；公开仓库以验证通过的源码快照发布，并在发布提交中记录本地源提交 SHA。
 
 ## 验证命令
 
