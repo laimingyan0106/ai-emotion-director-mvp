@@ -160,8 +160,9 @@ class ProviderAdapterTest(unittest.TestCase):
         self.assertEqual(captured["body"]["messages"][0]["role"], "system")
         self.assertEqual(
             captured["body"]["response_format"]["type"],
-            "json_schema",
+            "json_object",
         )
+        self.assertIn("JSON Schema", captured["body"]["messages"][1]["content"])
 
 
 if __name__ == "__main__":

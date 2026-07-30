@@ -53,20 +53,17 @@ class OpenAIResponsesClient:
     ) -> dict[str, Any]:
         if self._api_style == "chat_completions":
             endpoint = f"{self._base_url}/chat/completions"
+            schema_prompt = (
+                f"{prompt}\n\nReturn one JSON object only. It must satisfy this "
+                f"JSON Schema exactly:\n{json.dumps(schema, ensure_ascii=False)}"
+            )
             request_body = {
                 "model": model,
                 "messages": [
                     {"role": "system", "content": instructions},
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": schema_prompt},
                 ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema_name,
-                        "strict": True,
-                        "schema": schema,
-                    },
-                },
+                "response_format": {"type": "json_object"},
             }
         elif self._api_style == "responses":
             endpoint = f"{self._base_url}/responses"
