@@ -295,6 +295,7 @@ def get_director_adapter(settings: Settings | None = None) -> DirectorAdapter:
             base_url=resolved.llm_base_url,
             timeout_seconds=resolved.llm_timeout_seconds,
             http_retries=resolved.llm_http_retries,
+            api_style=resolved.llm_api_style,
         ),
         model=resolved.llm_model,
     )

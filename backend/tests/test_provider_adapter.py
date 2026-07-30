@@ -118,6 +118,51 @@ class ProviderAdapterTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(sleeps, [0.0])
 
+    def test_chat_completions_style_returns_schema_valid_asset(self):
+        captured = {}
+
+        def handler(request: httpx.Request):
+            captured["path"] = request.url.path
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    world_payload(),
+                                    ensure_ascii=False,
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = OpenAIResponsesClient(
+            api_key="test-secret-never-log",
+            base_url="https://relay.test/v1",
+            timeout_seconds=10,
+            http_retries=0,
+            api_style="chat_completions",
+            transport=httpx.MockTransport(handler),
+        )
+        result = client.create_structured(
+            model="gpt-test",
+            instructions="director",
+            prompt="world",
+            schema_name="world",
+            schema={},
+        )
+        self.assertEqual(result["name"], world_payload()["name"])
+        self.assertEqual(captured["path"], "/v1/chat/completions")
+        self.assertEqual(captured["body"]["messages"][0]["role"], "system")
+        self.assertEqual(
+            captured["body"]["response_format"]["type"],
+            "json_schema",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

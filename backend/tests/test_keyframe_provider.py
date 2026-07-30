@@ -10,6 +10,7 @@ from app.services.keyframes import (
     OpenAIKeyframeImageAdapter,
     get_keyframe_image_adapter,
     sanitize_provider_error,
+    _validated_remote_image_url,
 )
 
 
@@ -67,6 +68,30 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sk-testing-only", message)
         self.assertNotIn("should-not-leak", message)
 
+    async def test_openai_provider_downloads_url_response(self):
+        image = b"\x89PNG\r\n\x1a\nrelay-url-test"
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(
+                    200,
+                    json={"data": [{"url": "https://cdn.relay.test/frame.png"}]},
+                )
+            self.assertEqual(str(request.url), "https://cdn.relay.test/frame.png")
+            return httpx.Response(200, content=image)
+
+        settings = Settings(
+            _env_file=None,
+            adapter_mode="provider",
+            image_api_key="test-secret",
+        )
+        adapter = OpenAIKeyframeImageAdapter(
+            settings,
+            transport=httpx.MockTransport(handler),
+        )
+        result = await adapter.generate(shot_id="S01", prompt="frame")
+        self.assertEqual(result.content, image)
+
     def test_provider_mode_without_key_falls_back_explicitly(self):
         settings = Settings(
             _env_file=None,
@@ -84,3 +109,9 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("sk-secret", message)
         self.assertNotIn("topsecret", message)
+
+    def test_image_url_rejects_private_network_targets(self):
+        with self.assertRaises(ValueError):
+            _validated_remote_image_url("http://127.0.0.1/frame.png")
+        with self.assertRaises(ValueError):
+            _validated_remote_image_url("https://169.254.169.254/latest/meta-data")

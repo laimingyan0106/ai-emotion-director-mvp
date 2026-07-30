@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     llm_model: str = "gpt-5.6-terra"
     llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_style: str = "responses"
     llm_timeout_seconds: int = Field(default=60, ge=5, le=300)
     llm_http_retries: int = Field(default=2, ge=0, le=5)
     image_api_key: str | None = None

@@ -68,6 +68,7 @@ docker compose up --build
 - ShotSet v1.1 支持字段编辑、拖拽重排、新增、删除、复制、镜头锁定和单镜头局部再生成；所有写入创建新版本，服务端重算 `start_ms` 并严格校验总时长，锁定镜头不会被整组重新生成覆盖。
 - KeyframeSet v1.1 为每个镜头组合 World/Character/Shot Prompt，持久化 provider task id、状态、错误、重试次数、结果校验和与输入资产版本；支持单镜头/整组失败重试、用户确认锁、私有图片代理，以及包含 10 张关键帧和 PDF/JSON 清单的 ZIP 导出。
 - Provider 模式下关键帧使用 `IMAGE_API_KEY` 或 `OPENAI_API_KEY` 调用 `gpt-image-2`，并发生成并记录 request id、模型、尝试次数和脱敏错误。全部成功后可导出包含音频、时间线、关键帧和提示词的剪映小助手成片交接包。
+- OpenAI 兼容中转可通过 `LLM_API_STYLE=chat_completions` 接入文本导演；图片端点独立使用 `/images/generations`，兼容 URL 与 base64 两种返回。
 - 全新环境、Vercel 密钥、数据库迁移和发布验收见 `docs/DEPLOYMENT.md`。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。

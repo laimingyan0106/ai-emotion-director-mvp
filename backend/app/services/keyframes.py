@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+import ipaddress
 import io
 import json
 import re
@@ -10,6 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from html import escape
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -129,8 +131,30 @@ class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
             )
         try:
             payload = response.json()
-            content = base64.b64decode(payload["data"][0]["b64_json"], validate=True)
-        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
+            item = payload["data"][0]
+            if item.get("b64_json"):
+                content = base64.b64decode(item["b64_json"], validate=True)
+            elif item.get("url"):
+                image_url = _validated_remote_image_url(item["url"])
+                async with httpx.AsyncClient(
+                    timeout=self.timeout,
+                    transport=self.transport,
+                ) as image_client:
+                    image_response = await image_client.get(image_url)
+                    image_response.raise_for_status()
+                    if len(image_response.content) > 25 * 1024 * 1024:
+                        raise ValueError("generated image exceeds 25MB")
+                    content = image_response.content
+            else:
+                raise KeyError("b64_json/url")
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            httpx.HTTPError,
+        ) as error:
             raise RuntimeError("OpenAI image response did not contain valid image data") from error
         width, height = (int(part) for part in self.size.split("x", maxsplit=1))
         request_id = response.headers.get("x-request-id")
@@ -143,6 +167,28 @@ class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
             model=self.model,
             provider_task_id=request_id or f"openai:{shot_id}:{uuid4().hex[:16]}",
         )
+
+
+def _validated_remote_image_url(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("generated image URL must be a string")
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("generated image URL must be an unauthenticated HTTPS URL")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        address = None
+    if address and (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+    ):
+        raise ValueError("generated image URL cannot target a private address")
+    if parsed.hostname.lower() == "localhost" or parsed.hostname.lower().endswith(".localhost"):
+        raise ValueError("generated image URL cannot target localhost")
+    return value
 
 
 def get_keyframe_image_adapter(

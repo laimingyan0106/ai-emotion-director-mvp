@@ -30,6 +30,18 @@ npm run dev
 - 默认图片模型是 `gpt-image-2`，尺寸 `1280x720`、质量 `medium`。
 - `/health` 返回导演 adapter 与 `keyframe_provider`、`keyframe_model`、`keyframe_fallback_reason`，用于确认真实调用或回退。
 
+OpenAI 兼容中转站应填写基础地址，而不是把单个端点写入
+`LLM_BASE_URL`。例如 4sAPI：
+
+```dotenv
+LLM_BASE_URL=https://4sapi.com/v1
+LLM_API_STYLE=chat_completions
+IMAGE_BASE_URL=https://4sapi.com/v1
+```
+
+文本导演会调用 `/chat/completions`；关键帧仍调用专用
+`/images/generations`，并兼容中转站返回 URL 或 `b64_json`。
+
 真实密钥只放本地 `.env` 或 Vercel Environment Variables，禁止提交仓库或粘贴到任务聊天。Vercel 安全配置命令：
 
 ```powershell

@@ -30,6 +30,7 @@ class OpenAIResponsesClient:
         base_url: str,
         timeout_seconds: int,
         http_retries: int,
+        api_style: str = "responses",
         transport: httpx.BaseTransport | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -37,6 +38,7 @@ class OpenAIResponsesClient:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._http_retries = http_retries
+        self._api_style = api_style
         self._transport = transport
         self._sleeper = sleeper
 
@@ -49,27 +51,50 @@ class OpenAIResponsesClient:
         schema_name: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        request_body = {
-            "model": model,
-            "instructions": instructions,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                }
-            ],
-            "text": {
-                "format": {
+        if self._api_style == "chat_completions":
+            endpoint = f"{self._base_url}/chat/completions"
+            request_body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {
                     "type": "json_schema",
-                    "name": schema_name,
-                    "strict": True,
-                    "schema": schema,
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": schema,
+                    },
                 },
-                "verbosity": "low",
-            },
-            "reasoning": {"effort": "low"},
-            "store": False,
-        }
+            }
+        elif self._api_style == "responses":
+            endpoint = f"{self._base_url}/responses"
+            request_body = {
+                "model": model,
+                "instructions": instructions,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                    }
+                ],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": schema,
+                    },
+                    "verbosity": "low",
+                },
+                "reasoning": {"effort": "low"},
+                "store": False,
+            }
+        else:
+            raise ProviderRequestError(
+                f"Unsupported LLM API style: {self._api_style}"
+            )
         response_data: dict[str, Any] | None = None
         for attempt in range(self._http_retries + 1):
             try:
@@ -78,7 +103,7 @@ class OpenAIResponsesClient:
                     transport=self._transport,
                 ) as client:
                     response = client.post(
-                        f"{self._base_url}/responses",
+                        endpoint,
                         headers={
                             "authorization": f"Bearer {self._api_key}",
                             "content-type": "application/json",
@@ -124,6 +149,11 @@ class OpenAIResponsesClient:
         if response_data is None:
             raise ProviderRequestError("Provider returned no response")
         output_text = response_data.get("output_text")
+        if self._api_style == "chat_completions":
+            try:
+                output_text = response_data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                output_text = None
         if not output_text:
             for item in response_data.get("output", []):
                 if item.get("type") != "message":
