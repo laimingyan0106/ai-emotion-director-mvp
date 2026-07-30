@@ -171,3 +171,29 @@ docker compose up --build
   - failed 版本不替换激活版本且激活请求返回 409
   - `npm test`、`npm run lint`、Python compileall PASS
 - 下一任务：`V11-T005`，实现 World、Character、Story、Shots 严格 Schema 校验、结构化错误与自动重试。
+
+### V11-T005：结构化输出 Schema、校验与重试
+
+- 状态：完成
+- 新增严格领域模型：`WorldAsset`、`CharacterAsset`、`StoryAsset`、`ShotSetAsset`
+  - 全部模型禁止额外字段并限制字符串、列表、ID、色值、时长、FPS 与画幅
+  - Shot ID 必须唯一，时间线必须连续，镜头时长之和必须等于 ShotSet 声明时长
+  - ShotSet 总时长必须等于项目 `target_duration`
+  - 镜头的 `character_ids` 必须引用当前激活 Character 中真实存在的角色
+- 新增结构化生成服务：
+  - 支持 JSON 字符串或对象输出
+  - 首次解析或 Schema 校验失败后调用 Adapter `repair` 自动修复重试
+  - `GENERATION_RETRY_ATTEMPTS` 可配置，默认重试 1 次，最大 3 次
+  - 每次错误记录 attempt、location、type、message，不静默吞错
+  - 重试成功时错误历史写入新激活版本；最终失败时保留 last payload 为 failed 版本
+  - 最终失败返回 422 和结构化 `validation_errors`，旧激活版本保持不变
+- Demo Shots 增加显式 `character_ids=["CHAR-001"]`，进入与真实 LLM 相同的引用校验链路。
+- 验证结果：
+  - 后端 13/13 测试 PASS
+  - 畸形 JSON 自动修复一次后成功 PASS
+  - retry=0 时立即失败且错误可见 PASS
+  - 总时长不等于目标时长被拒绝 PASS
+  - 不存在的角色引用被拒绝 PASS
+  - extra 字段被拒绝 PASS
+  - API 最终失败写入 failed 版本且不污染旧激活版本 PASS
+- 下一任务：`V11-T006`，实现 FFmpeg/librosa 真实音频特征分析并保留 Demo fallback。

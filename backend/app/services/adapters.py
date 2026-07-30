@@ -4,8 +4,18 @@ from typing import Any
 
 class DirectorAdapter(ABC):
     @abstractmethod
-    def generate(self, task: str, context: dict[str, Any]) -> dict[str, Any]:
+    def generate(self, task: str, context: dict[str, Any]) -> Any:
         raise NotImplementedError
+
+    def repair(
+        self,
+        task: str,
+        invalid_output: Any,
+        validation_errors: list[dict[str, Any]],
+        context: dict[str, Any],
+    ) -> Any:
+        """Retry hook for providers; demo mode deterministically regenerates."""
+        return self.generate(task, context)
 
 
 class DemoDirectorAdapter(DirectorAdapter):
@@ -83,6 +93,7 @@ class DemoDirectorAdapter(DirectorAdapter):
                     "camera": camera,
                     "action": action,
                     "emotion": emotion,
+                    "character_ids": ["CHAR-001"],
                     "prompt": f"Cinematic shot: {action}; {camera}; poetic retro-futurism; midnight cyan and memory amber; consistent character CHAR-001; 16:9",
                 }
             )

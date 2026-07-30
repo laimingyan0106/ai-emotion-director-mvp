@@ -43,6 +43,7 @@ from .schemas import (
 )
 from .services.adapters import get_director_adapter
 from .services.audio import probe_audio
+from .services.generation import AssetGenerationError, generate_validated_asset
 from .services.storage import get_media_storage
 
 settings = get_settings()
@@ -184,19 +185,31 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     context = load_context(project_id)
     input_snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
     try:
-        result = adapter.generate(kind, context)
-    except Exception as error:
+        generation = generate_validated_asset(
+            adapter,
+            kind,
+            context,
+            retry_attempts=settings.generation_retry_attempts,
+        )
+    except AssetGenerationError as error:
         insert_asset_version(
             project_id,
             kind,
-            {},
+            error.last_payload,
             activate=False,
             provider=settings.adapter_mode,
             model=adapter.__class__.__name__,
             input_snapshot=input_snapshot,
-            validation_errors=[{"message": str(error)}],
+            validation_errors=error.validation_errors,
         )
-        raise HTTPException(status_code=502, detail=f"{kind} generation failed") from error
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(error),
+                "validation_errors": error.validation_errors,
+            },
+        ) from error
+    result = generation.model.model_dump(mode="json")
     asset = insert_asset_version(
         project_id,
         kind,
@@ -205,6 +218,7 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
         provider=settings.adapter_mode,
         model=adapter.__class__.__name__,
         input_snapshot=input_snapshot,
+        validation_errors=generation.validation_errors,
     )
     return PipelineAsset(
         project_id=project_id,

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     storage_mode: str = "auto"
     sqlite_path: Path = Path("./.data/emotion-director.db")
     adapter_mode: str = "demo"
+    generation_retry_attempts: int = Field(default=1, ge=0, le=3)
     llm_api_key: str | None = None
     image_api_key: str | None = None
     video_api_key: str | None = None
