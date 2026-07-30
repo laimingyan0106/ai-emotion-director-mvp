@@ -18,6 +18,7 @@ class StrictDomainModel(BaseModel):
 HexColor = Annotated[str, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}$")]
 CharacterId = Annotated[str, StringConstraints(pattern=r"^CHAR-\d{3}$")]
 ShotId = Annotated[str, StringConstraints(pattern=r"^S\d{2}$")]
+ReferenceId = Annotated[str, StringConstraints(pattern=r"^REF-[A-Z0-9-]{4,40}$")]
 
 
 class WorldCinematography(StrictDomainModel):
@@ -72,6 +73,17 @@ class WorldAsset(StrictDomainModel):
     locked_fields: list[WorldLockPath] = Field(default_factory=list, max_length=32)
 
 
+class CharacterReferenceImage(StrictDomainModel):
+    id: ReferenceId
+    framing: Literal["portrait", "half", "full"]
+    storage_path: str = Field(min_length=1, max_length=2000)
+    content_type: Literal["image/svg+xml", "image/png", "image/jpeg", "image/webp"]
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=120)
+    selected: bool = False
+    created_at: str = Field(min_length=1, max_length=80)
+
+
 class CharacterAsset(StrictDomainModel):
     id: CharacterId
     name: str = Field(min_length=1, max_length=120)
@@ -82,6 +94,13 @@ class CharacterAsset(StrictDomainModel):
     background: str = Field(min_length=1, max_length=1000)
     growth: list[str] = Field(min_length=1, max_length=8)
     continuity_lock: list[str] = Field(min_length=1, max_length=16)
+    negative_constraints: list[str] = Field(min_length=1, max_length=20)
+    provider_bindings: dict[str, str] = Field(default_factory=dict)
+    reference_images: list[CharacterReferenceImage] = Field(
+        default_factory=list,
+        max_length=24,
+    )
+    locked: bool = False
 
 
 class StoryAct(StrictDomainModel):
@@ -96,6 +115,12 @@ class StoryAsset(StrictDomainModel):
     acts: list[StoryAct] = Field(min_length=3, max_length=8)
 
 
+class CharacterVersionRef(StrictDomainModel):
+    character_id: CharacterId
+    asset_id: int = Field(ge=1)
+    version: int = Field(ge=1)
+
+
 class ShotAsset(StrictDomainModel):
     id: ShotId
     start: float = Field(ge=0)
@@ -105,7 +130,15 @@ class ShotAsset(StrictDomainModel):
     action: str = Field(min_length=1, max_length=800)
     emotion: str = Field(min_length=1, max_length=240)
     character_ids: list[CharacterId] = Field(min_length=1, max_length=8)
+    character_refs: list[CharacterVersionRef] = Field(min_length=1, max_length=8)
     prompt: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def references_match_character_ids(self) -> "ShotAsset":
+        ref_ids = [reference.character_id for reference in self.character_refs]
+        if sorted(set(ref_ids)) != sorted(set(self.character_ids)):
+            raise ValueError("character_refs must cover every character_id exactly")
+        return self
 
 
 class ShotSetAsset(StrictDomainModel):
@@ -197,4 +230,16 @@ def validate_domain_asset(
             raise ValueError(
                 f"ShotSet references unknown characters: {', '.join(missing)}"
             )
+        character_version = context.get("asset_versions", {}).get("character")
+        if character_version:
+            for shot in model.shots:
+                for reference in shot.character_refs:
+                    if (
+                        reference.asset_id != character_version.get("asset_id")
+                        or reference.version != character_version.get("version")
+                    ):
+                        raise ValueError(
+                            "ShotSet character_refs must reference the active "
+                            "character asset_id/version"
+                        )
     return model

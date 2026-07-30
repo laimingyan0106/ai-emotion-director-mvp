@@ -273,3 +273,67 @@ export function updateWorld(
     body: JSON.stringify(values),
   });
 }
+
+export function createCharacter(projectId: string): Promise<{
+  project_id: string;
+  kind: "character";
+  payload: Record<string, unknown>;
+  asset_id: number;
+  version: number;
+  status: string;
+  is_active: boolean;
+}> {
+  return request("/character/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId, count: 1 }),
+  });
+}
+
+export function generateCharacterReferences(
+  projectId: string,
+  expectedVersion: number,
+): Promise<{
+  asset: AssetVersion;
+  warnings: AssetDependencyWarning[];
+  consistency_risk: string | null;
+}> {
+  return request(`/projects/${encodeURIComponent(projectId)}/characters/references/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_version: expectedVersion }),
+  });
+}
+
+export function selectCharacterReferences(
+  projectId: string,
+  values: {
+    expected_version: number;
+    selected_reference_ids: string[];
+    locked: boolean;
+  },
+): Promise<{
+  asset: AssetVersion;
+  warnings: AssetDependencyWarning[];
+  consistency_risk: string | null;
+}> {
+  return request(`/projects/${encodeURIComponent(projectId)}/characters/references`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}
+
+export function characterReferenceUrl(
+  projectId: string,
+  assetId: number,
+  referenceId: string,
+  download = false,
+): string {
+  if (!configuredBaseUrl) return "";
+  const path = (
+    `/projects/${encodeURIComponent(projectId)}/character-assets/${assetId}` +
+    `/references/${encodeURIComponent(referenceId)}`
+  );
+  return `${configuredBaseUrl}${path}${download ? "?download=true" : ""}`;
+}

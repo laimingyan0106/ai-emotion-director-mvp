@@ -312,3 +312,38 @@ docker compose up --build
   - API 编辑、版本冲突、再生成保锁与镜头 World 版本引用测试 PASS
   - Next/Vinext 构建、TypeScript 与 ESLint PASS
 - 下一任务：`V11-T010`。
+
+### V11-T010：Character Asset、参考图与锁定
+
+- 状态：完成
+- Character Schema：
+  - 新增 `negative_constraints`、`provider_bindings`、`reference_images` 与 `locked`
+  - 参考图记录 framing、存储地址、媒体类型、provider、model、选择状态与生成时间
+  - 不承诺仅凭文本保持人物一致，缺少完整参考图时返回并显示明确风险
+- 参考图：
+  - 新增可替换 `CharacterImageAdapter`
+  - Demo/无密钥模式使用确定性 SVG Adapter，测试使用独立 Mock Adapter
+  - 每次生成 portrait、half、full 三类候选并写入私有媒体存储
+  - 新增鉴权代理式查看/下载 API，不向前端暴露 Blob 访问令牌
+  - 删除项目时同时去重清理所有历史角色版本引用的参考图文件
+- 选择、锁定与版本：
+  - 用户可选择候选；锁定要求每类构图恰好选择一张
+  - 选择、锁定和解锁均创建新的 Character 激活版本，不原地修改旧版本
+  - 锁定角色禁止直接重新生成，必须显式解锁
+  - 角色版本变化后，已有 Shots 返回下游依赖失效警告
+- 镜头引用：
+  - 每个 Shot 保存 `character_ids` 和对应的 `character_refs`
+  - `character_refs` 强制包含 `character_id + asset_id + version`
+  - Schema 校验所有镜头必须引用当前激活 Character 的准确版本
+- 前端：
+  - Character Studio 显示真实角色版本、负面约束、Provider 与锁定状态
+  - 支持生成三类参考图、查看、下载、选择、确认锁定、解锁和角色再生成
+  - 没有完整参考图或尚未锁定时显示一致性风险，不作虚假保证
+- 验证结果：
+  - 后端 27/27 测试 PASS
+  - Adapter Mock 三类生成、图片查看/下载、锁定/解锁测试 PASS
+  - 镜头角色 ID/asset/version 引用完整性测试 PASS
+  - 角色版本替换后的 Shots 依赖警告测试 PASS
+  - 参考图随项目删除清理测试 PASS
+  - 前端 4/4、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 下一任务：`V11-T011`，实现 Shot Card 编辑、拖拽重排和单镜头局部再生成。

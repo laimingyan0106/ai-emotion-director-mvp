@@ -414,7 +414,22 @@ def delete_project_record(project_id: UUID) -> list[str] | None:
             audio_query,
             (str(project_id),) if isinstance(database, SqliteDatabase) else (project_id,),
         ).fetchall()
-        storage_paths = [str(row["storage_path"]) for row in audio_rows]
+        storage_paths = {str(row["storage_path"]) for row in audio_rows}
+        asset_query = (
+            "SELECT payload FROM generated_assets WHERE project_id = ?"
+            if isinstance(database, SqliteDatabase)
+            else "SELECT payload FROM generated_assets WHERE project_id = %s"
+        )
+        asset_rows = connection.execute(
+            asset_query,
+            (str(project_id),) if isinstance(database, SqliteDatabase) else (project_id,),
+        ).fetchall()
+        for row in asset_rows:
+            payload = _decode_json(row["payload"], {})
+            for reference in payload.get("reference_images", []):
+                storage_path = reference.get("storage_path")
+                if storage_path:
+                    storage_paths.add(str(storage_path))
 
         if isinstance(database, SqliteDatabase):
             for table in ("render_jobs", "generated_assets", "audio_assets"):
@@ -423,7 +438,7 @@ def delete_project_record(project_id: UUID) -> list[str] | None:
         else:
             connection.execute("DELETE FROM projects WHERE id = %s", (project_id,))
         connection.commit()
-    return storage_paths
+    return sorted(storage_paths)
 
 
 def count_project_dependents(project_id: UUID) -> dict[str, int]:

@@ -1,13 +1,16 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   AssetVersion,
   analyzeAudio,
+  characterReferenceUrl,
   checkHealth,
   confirmSegment,
   createProject,
+  createCharacter,
   createWorld,
   deleteProject,
   fetchProject,
@@ -15,8 +18,10 @@ import {
   fetchAssetVersions,
   fetchSegmentRecommendations,
   getApiMode,
+  generateCharacterReferences,
   ProjectSnapshot,
   SegmentCandidate,
+  selectCharacterReferences,
   updateProject,
   updateWorld,
   uploadAudio,
@@ -41,6 +46,15 @@ type Shot = {
   emotion: string;
   prompt: string;
   color: string;
+};
+
+type CharacterReference = {
+  id: string;
+  framing: "portrait" | "half" | "full";
+  content_type: string;
+  provider: string;
+  model: string;
+  selected: boolean;
 };
 
 const nav: Array<{ id: View; label: string; mark: string }> = [
@@ -240,6 +254,10 @@ export default function Home() {
   const [worldWeatherDraft, setWorldWeatherDraft] = useState("");
   const [worldLockedFields, setWorldLockedFields] = useState<string[]>([]);
   const [worldBusy, setWorldBusy] = useState(false);
+  const [characterAsset, setCharacterAsset] = useState<AssetVersion | null>(null);
+  const [characterBusy, setCharacterBusy] = useState(false);
+  const [characterSelectedRefs, setCharacterSelectedRefs] = useState<string[]>([]);
+  const [characterRisk, setCharacterRisk] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const lastSavedName = useRef(projectName);
 
@@ -350,7 +368,9 @@ export default function Home() {
     const activeSegment = versions.groups.segment?.find((asset) => asset.is_active);
     const activeAnalysis = versions.groups.audio_analysis?.find((asset) => asset.is_active);
     const activeWorld = versions.groups.world?.find((asset) => asset.is_active) ?? null;
+    const activeCharacter = versions.groups.character?.find((asset) => asset.is_active) ?? null;
     hydrateWorld(activeWorld);
+    hydrateCharacter(activeCharacter);
     if (activeAnalysis) {
       const values = activeAnalysis.payload.energy_curve;
       if (Array.isArray(values)) {
@@ -403,6 +423,24 @@ export default function Home() {
     );
   }
 
+  function hydrateCharacter(asset: AssetVersion | null, risk?: string | null) {
+    setCharacterAsset(asset);
+    const references = Array.isArray(asset?.payload.reference_images)
+      ? asset.payload.reference_images as CharacterReference[]
+      : [];
+    const selected = references.filter((item) => item.selected);
+    setCharacterSelectedRefs(selected.map((item) => item.id));
+    if (risk !== undefined) {
+      setCharacterRisk(risk || "");
+    } else if (selected.length < 3) {
+      setCharacterRisk("尚未确认 portrait、half、full 三类参考图；仅凭文本无法承诺跨镜头人物一致性。");
+    } else if (!asset?.payload.locked) {
+      setCharacterRisk("参考图已选择但角色资产尚未锁定，后续版本替换可能导致人物漂移。");
+    } else {
+      setCharacterRisk("");
+    }
+  }
+
   function toggleWorldLock(path: string) {
     setWorldLockedFields((current) =>
       current.includes(path)
@@ -453,6 +491,68 @@ export default function Home() {
       setApiError(error instanceof ApiError ? error.message : "World 保存失败。");
     } finally {
       setWorldBusy(false);
+    }
+  }
+
+  async function generateCharacterAsset() {
+    if (!apiProjectId || !worldAsset) {
+      showToast("请先生成 World Bible");
+      return;
+    }
+    setCharacterBusy(true);
+    setApiError("");
+    try {
+      await createCharacter(apiProjectId);
+      await restoreProjectSegment(apiProjectId);
+      showToast(characterAsset ? "角色资产已重新生成" : "角色资产已生成");
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "角色资产生成失败。");
+    } finally {
+      setCharacterBusy(false);
+    }
+  }
+
+  async function generateReferenceCandidates() {
+    if (!apiProjectId || !characterAsset) return;
+    setCharacterBusy(true);
+    setApiError("");
+    try {
+      const result = await generateCharacterReferences(apiProjectId, characterAsset.version);
+      hydrateCharacter(result.asset, result.consistency_risk);
+      showToast("portrait、half、full 三类参考图候选已生成");
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "角色参考图生成失败。");
+    } finally {
+      setCharacterBusy(false);
+    }
+  }
+
+  function toggleCharacterReference(referenceId: string) {
+    setCharacterSelectedRefs((current) =>
+      current.includes(referenceId)
+        ? current.filter((item) => item !== referenceId)
+        : [...current, referenceId],
+    );
+  }
+
+  async function saveCharacterReferenceLock(locked: boolean) {
+    if (!apiProjectId || !characterAsset) return;
+    setCharacterBusy(true);
+    setApiError("");
+    try {
+      const result = await selectCharacterReferences(apiProjectId, {
+        expected_version: characterAsset.version,
+        selected_reference_ids: characterSelectedRefs,
+        locked,
+      });
+      hydrateCharacter(result.asset, result.consistency_risk);
+      showToast(locked
+        ? `角色 v${result.asset.version} 已锁定，后续镜头将引用此版本`
+        : `角色 v${result.asset.version} 已解锁`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "角色参考图状态保存失败。");
+    } finally {
+      setCharacterBusy(false);
     }
   }
 
@@ -962,39 +1062,91 @@ export default function Home() {
 
         {view === "character" && (
           <div className="page studio-page">
-            <PageHeading overline="CHARACTER ASSET / 03" title="黎夏 · 记忆地图师" subtitle="角色不是一段描述，而是一套跨镜头保持一致的资产。" ready={isReady} />
+            <PageHeading
+              overline={`CHARACTER ASSET / 03${characterAsset ? ` · V${characterAsset.version}` : ""}`}
+              title={characterAsset
+                ? `${String(characterAsset.payload.name)} · ${String(characterAsset.payload.role)}`
+                : "等待生成角色资产"}
+              subtitle="文本、负面约束、参考图和版本引用共同构成角色一致性资产。"
+              ready={isReady}
+            />
+            {!characterAsset ? (
+              <section className="panel world-empty">
+                <span>CHARACTER ASSET</span>
+                <h3>从当前 World 版本生成结构化角色</h3>
+                <p>角色生成后还需要确认三类参考图；仅凭文本不能承诺跨镜头人物一致。</p>
+                <button className="primary-button" disabled={characterBusy || !worldAsset} onClick={() => void generateCharacterAsset()}>
+                  {characterBusy ? "生成中…" : "生成角色资产"}
+                </button>
+              </section>
+            ) : (
             <div className="character-layout">
               <section className="character-portrait panel">
                 <div className="portrait-frame">
                   <div className="portrait-silhouette"><i /><b /></div>
-                  <span>CHAR-001</span>
+                  <span>{String(characterAsset.payload.id)}</span>
                 </div>
                 <div className="identity">
-                  <h3>黎夏</h3><p>27 岁 · 记忆地图师</p>
-                  <div><Badge tone="gold">敏锐</Badge><Badge>克制</Badge><Badge>固执</Badge></div>
+                  <h3>{String(characterAsset.payload.name)}</h3>
+                  <p>{String(characterAsset.payload.age)} 岁 · {String(characterAsset.payload.role)}</p>
+                  <div>{(Array.isArray(characterAsset.payload.personality) ? characterAsset.payload.personality : []).map((item, index) => (
+                    <Badge tone={index === 0 ? "gold" : "neutral"} key={String(item)}>{String(item)}</Badge>
+                  ))}</div>
                 </div>
               </section>
               <section className="panel character-spec">
                 <div className="panel-title"><span>CONTINUITY LOCK</span><strong>视觉一致性描述</strong></div>
-                <p>短黑发，发尾因潮气微卷；灰绿色眼睛；左眉尾有一道浅疤；穿墨绿防水长风衣、米白高领针织衫与磨旧皮靴。随身携带黄铜制图笔和折叠纸地图。</p>
+                <p>{String(characterAsset.payload.appearance)}</p>
                 <div className="spec-grid">
-                  <Field label="轮廓" value="窄肩、直线型长风衣、轻微前倾" />
-                  <Field label="材质" value="湿润棉布、旧黄铜、纤维纸" />
-                  <Field label="禁止漂移" value="发型、眉疤、瞳色、风衣长度" />
-                  <Field label="参考提示" value="真实东亚面孔，克制表演，非偶像妆" />
+                  <Field label="禁止漂移" value={(Array.isArray(characterAsset.payload.continuity_lock) ? characterAsset.payload.continuity_lock : []).join("、")} />
+                  <Field label="负面约束" value={(Array.isArray(characterAsset.payload.negative_constraints) ? characterAsset.payload.negative_constraints : []).join("；")} />
+                  <Field label="图片 Provider" value={String((characterAsset.payload.provider_bindings as Record<string, unknown> | undefined)?.reference_provider || "尚未绑定")} />
+                  <Field label="锁定状态" value={characterAsset.payload.locked ? "已锁定到当前参考图版本" : "未锁定"} />
                 </div>
               </section>
-              <section className="panel growth-panel">
-                <div className="panel-title"><span>CHARACTER ARC</span><strong>成长路线</strong></div>
-                <div className="arc">
-                  <div><span>ACT I</span><strong>寻找答案</strong><p>相信找回记忆就能修复失去。</p></div>
-                  <i />
-                  <div><span>ACT II</span><strong>直面选择</strong><p>发现遗忘是自己主动做出的决定。</p></div>
-                  <i />
-                  <div><span>ACT III</span><strong>选择当下</strong><p>不再追赶列车，让城市回到海面。</p></div>
+              <section className="panel growth-panel character-reference-panel">
+                <div className="panel-title"><span>REFERENCE SET</span><strong>参考图候选与版本锁定</strong></div>
+                {characterRisk && <p className="consistency-risk">{characterRisk}</p>}
+                {(Array.isArray(characterAsset.payload.reference_images) && characterAsset.payload.reference_images.length > 0) ? (
+                  <div className="reference-grid">
+                    {(characterAsset.payload.reference_images as CharacterReference[]).map((reference) => {
+                      const selected = characterSelectedRefs.includes(reference.id);
+                      return (
+                        <article className={selected ? "reference-card selected" : "reference-card"} key={reference.id}>
+                          <img
+                            src={characterReferenceUrl(apiProjectId, characterAsset.id, reference.id)}
+                            alt={`${String(characterAsset.payload.name)} ${reference.framing} 参考图`}
+                          />
+                          <div>
+                            <strong>{reference.framing.toUpperCase()}</strong>
+                            <button disabled={Boolean(characterAsset.payload.locked) || characterBusy} onClick={() => toggleCharacterReference(reference.id)}>
+                              {selected ? "已选择" : "选择"}
+                            </button>
+                            <a href={characterReferenceUrl(apiProjectId, characterAsset.id, reference.id, true)}>下载</a>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="reference-empty">暂无参考图。当前镜头只能依赖文字描述，存在明确的一致性风险。</p>
+                )}
+                <div className="world-editor-actions">
+                  <button className="ghost-button" disabled={characterBusy || Boolean(characterAsset.payload.locked)} onClick={() => void generateReferenceCandidates()}>
+                    生成三类参考图
+                  </button>
+                  {characterAsset.payload.locked ? (
+                    <button className="primary-button" disabled={characterBusy} onClick={() => void saveCharacterReferenceLock(false)}>解锁角色</button>
+                  ) : (
+                    <button className="primary-button" disabled={characterBusy || characterSelectedRefs.length < 3} onClick={() => void saveCharacterReferenceLock(true)}>确认并锁定</button>
+                  )}
+                  <button className="text-button" disabled={characterBusy || Boolean(characterAsset.payload.locked)} onClick={() => void generateCharacterAsset()}>
+                    重新生成角色
+                  </button>
                 </div>
               </section>
             </div>
+            )}
           </div>
         )}
 

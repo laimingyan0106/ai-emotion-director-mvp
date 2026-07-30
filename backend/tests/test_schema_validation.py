@@ -72,6 +72,7 @@ class SchemaValidationTest(unittest.TestCase):
     def test_unknown_character_reference_is_rejected(self):
         payload = deepcopy(DemoDirectorAdapter().generate("shots", {}))
         payload["shots"][0]["character_ids"] = ["CHAR-999"]
+        payload["shots"][0]["character_refs"][0]["character_id"] = "CHAR-999"
         with self.assertRaises(ValueError) as raised:
             validate_domain_asset("shots", payload, self.context)
         self.assertIn("unknown characters", str(raised.exception))

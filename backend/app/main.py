@@ -1,5 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -7,8 +9,10 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .config import get_settings
+from .domain import CharacterAsset
 from .database import (
     create_project_record,
     create_render_job,
@@ -32,6 +36,9 @@ from .schemas import (
     AssetActivationResponse,
     AssetVersion,
     AssetVersionsResponse,
+    CharacterReferenceGenerateRequest,
+    CharacterReferenceResponse,
+    CharacterReferenceSelectionRequest,
     CharacterRequest,
     PipelineAsset,
     ProjectCreate,
@@ -50,6 +57,7 @@ from .schemas import (
 )
 from .services.adapters import get_director_adapter
 from .services.audio import analyze_audio_file, demo_analysis
+from .services.character_references import get_character_image_adapter
 from .services.generation import AssetGenerationError, generate_validated_asset
 from .services.providers import ProviderRequestError
 from .services.segments import (
@@ -68,6 +76,7 @@ from .services.world import (
 settings = get_settings()
 adapter = get_director_adapter()
 media_storage = get_media_storage()
+character_image_adapter = get_character_image_adapter()
 
 
 @asynccontextmanager
@@ -265,6 +274,15 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     except SegmentSelectionError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     current_same_kind = context.get("assets", {}).get(kind)
+    if (
+        kind == "character"
+        and isinstance(current_same_kind, dict)
+        and current_same_kind.get("locked")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Unlock the active Character Asset before regenerating it",
+        )
     input_snapshot = generation_input_snapshot(project_id, kind)
     prompt = adapter.build_prompt(kind, context)
     try:
@@ -569,6 +587,253 @@ def create_world(payload: ProjectRef) -> PipelineAsset:
 @app.post("/character/create", response_model=PipelineAsset)
 def create_character(payload: CharacterRequest) -> PipelineAsset:
     return create_asset(payload.project_id, "character")
+
+
+def _active_character_asset(project_id: UUID) -> dict:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "character")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active Character Asset not found")
+    return current
+
+
+def _assert_character_version(current: dict, expected_version: int) -> None:
+    if int(current["version"]) != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Character version conflict",
+                "expected_version": expected_version,
+                "active_version": current["version"],
+            },
+        )
+
+
+def _character_consistency_risk(payload: dict) -> str | None:
+    selected = [
+        item
+        for item in payload.get("reference_images", [])
+        if item.get("selected")
+    ]
+    framings = {item.get("framing") for item in selected}
+    if framings != {"portrait", "half", "full"}:
+        return (
+            "角色尚未确认 portrait、half、full 三类参考图；仅凭文本无法承诺"
+            "跨镜头人物一致性。"
+        )
+    if not payload.get("locked"):
+        return "参考图已选择但角色资产尚未锁定，后续版本替换可能导致人物漂移。"
+    return None
+
+
+@app.post(
+    "/projects/{project_id}/characters/references/generate",
+    response_model=CharacterReferenceResponse,
+)
+async def generate_character_references(
+    project_id: UUID,
+    request: CharacterReferenceGenerateRequest,
+) -> CharacterReferenceResponse:
+    current = _active_character_asset(project_id)
+    _assert_character_version(current, request.expected_version)
+    if current["payload"].get("locked"):
+        raise HTTPException(
+            status_code=409,
+            detail="Unlock the Character Asset before generating new candidates",
+        )
+    updated = deepcopy(current["payload"])
+    if len(updated.get("reference_images", [])) + 3 > 24:
+        raise HTTPException(
+            status_code=409,
+            detail="Character reference candidate limit reached",
+        )
+    generated_references: list[dict] = []
+    uploaded_paths: list[str] = []
+    try:
+        for framing in ("portrait", "half", "full"):
+            reference_id = f"REF-{framing.upper()}-{uuid4().hex[:8].upper()}"
+            generated = await character_image_adapter.generate(updated, framing)
+            suffix = {
+                "image/svg+xml": "svg",
+                "image/png": "png",
+                "image/jpeg": "jpg",
+                "image/webp": "webp",
+            }[generated.content_type]
+            storage_path = await media_storage.put(
+                (
+                    f"projects/{project_id}/characters/{updated['id']}/"
+                    f"{reference_id}.{suffix}"
+                ),
+                BytesIO(generated.content),
+                content_type=generated.content_type,
+            )
+            uploaded_paths.append(storage_path)
+            generated_references.append(
+                {
+                    "id": reference_id,
+                    "framing": framing,
+                    "storage_path": storage_path,
+                    "content_type": generated.content_type,
+                    "provider": generated.provider,
+                    "model": generated.model,
+                    "selected": False,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+    except Exception as error:
+        for storage_path in uploaded_paths:
+            try:
+                await media_storage.delete(storage_path)
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=502,
+            detail=f"Character reference provider failed: {error}",
+        ) from error
+    updated["reference_images"] = [
+        *updated.get("reference_images", []),
+        *generated_references,
+    ]
+    updated["provider_bindings"] = {
+        **updated.get("provider_bindings", {}),
+        "reference_provider": generated_references[0]["provider"],
+        "reference_model": generated_references[0]["model"],
+    }
+    updated = CharacterAsset.model_validate(updated).model_dump(mode="json")
+    asset = insert_asset_version(
+        project_id,
+        "character",
+        updated,
+        activate=True,
+        provider=generated_references[0]["provider"],
+        model=generated_references[0]["model"],
+        prompt="Generate portrait, half, and full character reference candidates",
+        input_snapshot=generation_input_snapshot(project_id, "character"),
+    )
+    return CharacterReferenceResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+        consistency_risk=_character_consistency_risk(updated),
+    )
+
+
+@app.patch(
+    "/projects/{project_id}/characters/references",
+    response_model=CharacterReferenceResponse,
+)
+def select_character_references(
+    project_id: UUID,
+    request: CharacterReferenceSelectionRequest,
+) -> CharacterReferenceResponse:
+    current = _active_character_asset(project_id)
+    _assert_character_version(current, request.expected_version)
+    updated = deepcopy(current["payload"])
+    candidates = updated.get("reference_images", [])
+    known_ids = {item["id"] for item in candidates}
+    selected_ids = list(dict.fromkeys(request.selected_reference_ids))
+    unknown = sorted(set(selected_ids) - known_ids)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown character reference ids: {', '.join(unknown)}",
+        )
+    for item in candidates:
+        item["selected"] = item["id"] in selected_ids
+    selected_counts = {
+        framing: sum(
+            1
+            for item in candidates
+            if item.get("selected") and item["framing"] == framing
+        )
+        for framing in ("portrait", "half", "full")
+    }
+    if request.locked and any(count != 1 for count in selected_counts.values()):
+        raise HTTPException(
+            status_code=422,
+            detail="Locking requires one selected portrait, half, and full reference",
+        )
+    updated["locked"] = request.locked
+    updated["provider_bindings"] = {
+        **updated.get("provider_bindings", {}),
+        "selected_reference_ids": ",".join(selected_ids),
+    }
+    updated = CharacterAsset.model_validate(updated).model_dump(mode="json")
+    asset = insert_asset_version(
+        project_id,
+        "character",
+        updated,
+        activate=True,
+        provider="user",
+        model="character-reference-lock",
+        prompt="Select and lock character reference candidates",
+        input_snapshot=generation_input_snapshot(project_id, "character"),
+    )
+    return CharacterReferenceResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+        consistency_risk=_character_consistency_risk(updated),
+    )
+
+
+@app.get(
+    "/projects/{project_id}/character-assets/{asset_id}/references/{reference_id}",
+)
+async def get_character_reference(
+    project_id: UUID,
+    asset_id: int,
+    reference_id: str,
+    download: bool = False,
+) -> Response:
+    asset = next(
+        (
+            item
+            for item in list_asset_versions(project_id, "character")
+            if int(item["id"]) == asset_id
+        ),
+        None,
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Character Asset not found")
+    reference = next(
+        (
+            item
+            for item in asset["payload"].get("reference_images", [])
+            if item.get("id") == reference_id
+        ),
+        None,
+    )
+    if not reference:
+        raise HTTPException(status_code=404, detail="Character reference not found")
+    try:
+        content = await media_storage.read(reference["storage_path"])
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Character reference media unavailable: {error}",
+        ) from error
+    extension = {
+        "image/svg+xml": "svg",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+    }[reference["content_type"]]
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type=reference["content_type"],
+        headers={
+            "Content-Disposition": (
+                f'{disposition}; filename="{reference_id}.{extension}"'
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/story/create", response_model=PipelineAsset)

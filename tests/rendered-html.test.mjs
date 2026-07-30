@@ -51,3 +51,17 @@ test("World Studio exposes structured versioned editing controls", async () => {
   assert.match(client, /export function updateWorld/);
   assert.match(client, /expected_version/);
 });
+
+test("Character Studio exposes reference generation and version locking", async () => {
+  const [page, client] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("lib/api-client.ts", root), "utf8"),
+  ]);
+  assert.match(page, /REFERENCE SET/);
+  assert.match(page, /生成三类参考图/);
+  assert.match(page, /确认并锁定/);
+  assert.match(page, /仅凭文本无法承诺跨镜头人物一致性/);
+  assert.match(client, /generateCharacterReferences/);
+  assert.match(client, /selectCharacterReferences/);
+  assert.match(client, /characterReferenceUrl/);
+});

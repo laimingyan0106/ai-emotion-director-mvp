@@ -121,6 +121,14 @@ class DemoDirectorAdapter(DirectorAdapter):
             "background": "替城市居民修复被雨水损坏的记忆地图",
             "growth": ["寻找答案", "直面选择", "选择当下"],
             "continuity_lock": ["发型", "眉疤", "瞳色", "风衣长度"],
+            "negative_constraints": [
+                "禁止改变短黑发与左眉尾浅疤",
+                "禁止偶像妆、夸张磨皮与欧美化五官",
+                "禁止改变墨绿长风衣的长度和材质",
+            ],
+            "provider_bindings": {},
+            "reference_images": [],
+            "locked": False,
         }
 
     def _story(self, _: dict[str, Any]) -> dict[str, Any]:
@@ -134,7 +142,11 @@ class DemoDirectorAdapter(DirectorAdapter):
             ],
         }
 
-    def _shots(self, _: dict[str, Any]) -> dict[str, Any]:
+    def _shots(self, context: dict[str, Any]) -> dict[str, Any]:
+        character_version = context.get("asset_versions", {}).get(
+            "character",
+            {"asset_id": 1, "version": 1},
+        )
         actions = [
             ("大远景", "24mm · 缓慢推进", "雨幕中的悬浮城首次显形", "孤独 / 预兆"),
             ("近景", "85mm · 手持微颤", "黎夏睁眼，瞳孔倒映列车灯", "苏醒 / 不安"),
@@ -160,6 +172,13 @@ class DemoDirectorAdapter(DirectorAdapter):
                     "action": action,
                     "emotion": emotion,
                     "character_ids": ["CHAR-001"],
+                    "character_refs": [
+                        {
+                            "character_id": "CHAR-001",
+                            "asset_id": int(character_version["asset_id"]),
+                            "version": int(character_version["version"]),
+                        }
+                    ],
                     "prompt": f"Cinematic shot: {action}; {camera}; poetic retro-futurism; midnight cyan and memory amber; consistent character CHAR-001; 16:9",
                 }
             )

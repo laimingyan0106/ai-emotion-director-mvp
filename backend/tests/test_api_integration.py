@@ -29,6 +29,10 @@ from app.database import (  # noqa: E402
 )
 from app.services.adapters import DemoDirectorAdapter, DirectorAdapter  # noqa: E402
 from app.services.audio import demo_analysis  # noqa: E402
+from app.services.character_references import (  # noqa: E402
+    CharacterImageAdapter,
+    GeneratedCharacterReference,
+)
 from app.services.segments import restrict_context_to_confirmed_segment  # noqa: E402
 from app.services.providers import ProviderRequestError  # noqa: E402
 
@@ -60,6 +64,20 @@ class ChangingWorldAdapter(DirectorAdapter):
             payload["name"] = "重新生成的世界"
             payload["mutable_state"]["weather"] = "晴朗无雨"
         return payload
+
+
+class RecordingImageAdapter(CharacterImageAdapter):
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, character, framing):
+        self.calls.append((character["id"], framing))
+        return GeneratedCharacterReference(
+            content=f"<svg><title>{framing}</title></svg>".encode(),
+            content_type="image/svg+xml",
+            provider="mock-image",
+            model="mock-reference-v1",
+        )
 
 
 def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
@@ -135,6 +153,125 @@ def seed_confirmed_segment(project_id: str, duration: float = 60.0):
 
 
 class ApiIntegrationTest(unittest.TestCase):
+    def test_character_references_lock_download_and_shot_version_integrity(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "Character references"},
+            ).json()["id"]
+            seed_confirmed_segment(project_id)
+            client.post("/world/create", json={"project_id": project_id})
+            created = client.post(
+                "/character/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertTrue(created.json()["payload"]["negative_constraints"])
+
+            mock_adapter = RecordingImageAdapter()
+            original_image_adapter = main_module.character_image_adapter
+            main_module.character_image_adapter = mock_adapter
+            try:
+                generated = client.post(
+                    f"/projects/{project_id}/characters/references/generate",
+                    json={"expected_version": created.json()["version"]},
+                )
+            finally:
+                main_module.character_image_adapter = original_image_adapter
+            self.assertEqual(generated.status_code, 200)
+            generated_body = generated.json()
+            references = generated_body["asset"]["payload"]["reference_images"]
+            self.assertEqual(
+                {item["framing"] for item in references},
+                {"portrait", "half", "full"},
+            )
+            self.assertEqual(
+                mock_adapter.calls,
+                [
+                    ("CHAR-001", "portrait"),
+                    ("CHAR-001", "half"),
+                    ("CHAR-001", "full"),
+                ],
+            )
+            self.assertIsNotNone(generated_body["consistency_risk"])
+
+            first = references[0]
+            viewed = client.get(
+                (
+                    f"/projects/{project_id}/character-assets/"
+                    f"{generated_body['asset']['id']}/references/{first['id']}"
+                )
+            )
+            self.assertEqual(viewed.status_code, 200)
+            self.assertEqual(viewed.headers["content-type"], "image/svg+xml")
+            downloaded = client.get(
+                (
+                    f"/projects/{project_id}/character-assets/"
+                    f"{generated_body['asset']['id']}/references/{first['id']}"
+                    "?download=true"
+                )
+            )
+            self.assertIn(
+                "attachment",
+                downloaded.headers["content-disposition"],
+            )
+
+            locked = client.patch(
+                f"/projects/{project_id}/characters/references",
+                json={
+                    "expected_version": generated_body["asset"]["version"],
+                    "selected_reference_ids": [item["id"] for item in references],
+                    "locked": True,
+                },
+            )
+            self.assertEqual(locked.status_code, 200)
+            locked_body = locked.json()
+            self.assertIsNone(locked_body["consistency_risk"])
+            self.assertTrue(locked_body["asset"]["payload"]["locked"])
+
+            blocked_regeneration = client.post(
+                "/character/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(blocked_regeneration.status_code, 409)
+
+            client.post("/story/create", json={"project_id": project_id})
+            shots = client.post(
+                "/shots/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(shots.status_code, 200)
+            character_asset = locked_body["asset"]
+            for shot in shots.json()["payload"]["shots"]:
+                self.assertEqual(
+                    shot["character_refs"],
+                    [
+                        {
+                            "character_id": "CHAR-001",
+                            "asset_id": character_asset["id"],
+                            "version": character_asset["version"],
+                        }
+                    ],
+                )
+
+            unlocked = client.patch(
+                f"/projects/{project_id}/characters/references",
+                json={
+                    "expected_version": character_asset["version"],
+                    "selected_reference_ids": [item["id"] for item in references],
+                    "locked": False,
+                },
+            )
+            self.assertEqual(unlocked.status_code, 200)
+            self.assertIsNotNone(unlocked.json()["consistency_risk"])
+            self.assertTrue(
+                any(
+                    warning["kind"] == "shots"
+                    and warning["upstream_kind"] == "character"
+                    for warning in unlocked.json()["warnings"]
+                )
+            )
+
     def test_create_upload_and_refetch_project(self):
         with TestClient(app) as client:
             health = client.get("/health")
@@ -240,7 +377,15 @@ class ApiIntegrationTest(unittest.TestCase):
             self.assertEqual(uploaded.status_code, 201)
             seed_confirmed_segment(project_id)
             self.assertEqual(client.post("/world/create", json={"project_id": project_id}).status_code, 200)
-            self.assertEqual(client.post("/character/create", json={"project_id": project_id}).status_code, 200)
+            character = client.post("/character/create", json={"project_id": project_id})
+            self.assertEqual(character.status_code, 200)
+            self.assertEqual(
+                client.post(
+                    f"/projects/{project_id}/characters/references/generate",
+                    json={"expected_version": character.json()["version"]},
+                ).status_code,
+                200,
+            )
             self.assertEqual(client.post("/story/create", json={"project_id": project_id}).status_code, 200)
             self.assertEqual(client.post("/shots/create", json={"project_id": project_id}).status_code, 200)
             self.assertEqual(client.post("/render/start", json={"project_id": project_id}).status_code, 202)

@@ -128,6 +128,22 @@ class WorldUpdateResponse(BaseModel):
     warnings: list[AssetDependencyWarning] = Field(default_factory=list)
 
 
+class CharacterReferenceGenerateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+
+
+class CharacterReferenceSelectionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    selected_reference_ids: list[str] = Field(default_factory=list, max_length=12)
+    locked: bool
+
+
+class CharacterReferenceResponse(BaseModel):
+    asset: AssetVersion
+    warnings: list[AssetDependencyWarning] = Field(default_factory=list)
+    consistency_risk: str | None = None
+
+
 class ProjectResponse(BaseModel):
     id: UUID
     name: str

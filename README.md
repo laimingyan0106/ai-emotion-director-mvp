@@ -36,6 +36,9 @@ docker compose up --build
 - `GET /projects/{project_id}/segments/recommendations`
 - `POST /projects/{project_id}/segments/confirm`
 - `PATCH /projects/{project_id}/world`
+- `POST /projects/{project_id}/characters/references/generate`
+- `PATCH /projects/{project_id}/characters/references`
+- `GET /projects/{project_id}/character-assets/{asset_id}/references/{reference_id}`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -58,6 +61,7 @@ docker compose up --build
 - 音频分析后提供高潮、叙事转折、平稳三类 30 秒候选；用户可拖动起止点并显式确认，未确认片段时 World/Character/Story/Shots API 返回 409。
 - `ADAPTER_MODE=provider` 且配置 `LLM_API_KEY`/`OPENAI_API_KEY` 时使用 OpenAI Responses API；模型默认 `gpt-5.6-terra` 并可由 `LLM_MODEL` 覆盖。缺少密钥或 Provider 不支持时自动回落完整 Demo，并在 `/health` 的实际 adapter 与 fallback reason 中明确显示。
 - World Bible v1.1 将稳定规则与可变状态分开保存；World Studio 支持结构化字段编辑、字段锁定和重新生成，锁定值不会在再生成时漂移，镜头资产会记录明确的 World asset/version 输入快照。
+- Character Asset v1.1 保存负面约束、Provider 绑定和 portrait/half/full 三类参考图；用户确认并锁定后，镜头同时记录 character_id、asset_id 和 version。未完成三类参考图确认时，界面明确提示仅凭文本无法保证人物一致。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 

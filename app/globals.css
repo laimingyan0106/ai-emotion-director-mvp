@@ -184,6 +184,17 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 .arc span { font: 8px "Courier New", monospace; color: var(--gold); }
 .arc strong { display: block; margin: 7px 0; font: 17px STSong, SimSun, serif; }
 .arc p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.character-reference-panel { grid-column: 1 / -1; }
+.consistency-risk { padding: 12px 14px; border-left: 2px solid #d58b8b; background: rgba(213,139,139,.07); color: #e6b5b5; font-size: 11px; line-height: 1.7; }
+.reference-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+.reference-card { border: 1px solid var(--line); background: rgba(0,0,0,.18); }
+.reference-card.selected { border-color: var(--gold); box-shadow: inset 0 0 0 1px rgba(239,189,101,.25); }
+.reference-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #071011; }
+.reference-card > div { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; padding: 10px; }
+.reference-card strong { color: var(--gold); font: 9px "Courier New",monospace; }
+.reference-card button, .reference-card a { border: 0; background: transparent; color: var(--teal); font-size: 9px; cursor: pointer; text-decoration: none; }
+.reference-card button:disabled { opacity: .45; cursor: not-allowed; }
+.reference-empty { color: var(--muted); font-size: 12px; }
 
 .story-logline { border-left: 2px solid var(--gold); margin-bottom: 14px; }
 .story-logline > span { color: var(--gold); font: 9px "Courier New", monospace; letter-spacing: .15em; }
@@ -288,6 +299,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
   .arc > i { width: 1px; height: 18px; margin-left: 12px; }
   .timeline-strip { grid-template-columns: repeat(10, 90px); }
   .render-summary { flex-direction: column; text-align: center; }
+  .reference-grid { grid-template-columns: 1fr; }
   .queue-head, .queue-row { grid-template-columns: 48px 1fr 70px; }
   .queue-head span:nth-child(3), .queue-row > span:nth-child(3) { display: none; }
   .stage-list { grid-template-columns: repeat(2,1fr); }
