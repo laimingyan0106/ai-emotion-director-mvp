@@ -4,6 +4,7 @@ import unittest
 import wave
 import math
 import struct
+from copy import deepcopy
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -80,6 +81,28 @@ class RecordingImageAdapter(CharacterImageAdapter):
         )
 
 
+class CountingShotAdapter(DemoDirectorAdapter):
+    provider_name = "mock-shot"
+    model_name = "mock-shot-v1"
+
+    def __init__(self):
+        super().__init__()
+        self.group_calls = 0
+        self.single_calls = []
+
+    def generate(self, task, context):
+        if task == "shots":
+            self.group_calls += 1
+        return super().generate(task, context)
+
+    def regenerate_shot(self, current_shot, context):
+        self.single_calls.append(current_shot["id"])
+        result = deepcopy(current_shot)
+        result["action"] = f"{current_shot['action']} · 局部再生成"
+        result["prompt"] = f"{current_shot['prompt']} · regenerated only"
+        return result
+
+
 def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
     buffer = BytesIO()
     with wave.open(buffer, "wb") as output:
@@ -153,6 +176,121 @@ def seed_confirmed_segment(project_id: str, duration: float = 60.0):
 
 
 class ApiIntegrationTest(unittest.TestCase):
+    def test_shot_editor_reorder_versioning_local_regenerate_and_lock(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "Shot editor"},
+            ).json()["id"]
+            seed_confirmed_segment(project_id)
+            client.post("/world/create", json={"project_id": project_id})
+            client.post("/character/create", json={"project_id": project_id})
+            client.post("/story/create", json={"project_id": project_id})
+            created = client.post(
+                "/shots/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(created.status_code, 200)
+            original = created.json()
+            edited_shots = deepcopy(original["payload"]["shots"])
+            moved = edited_shots.pop(1)
+            edited_shots.insert(0, moved)
+            edited_shots[1]["action"] = "这是被用户锁定的动作"
+            edited_shots[1]["locked"] = True
+            edited_shots.pop()
+            duplicate = deepcopy(edited_shots[-1])
+            duplicate["id"] = "S11"
+            duplicate["locked"] = False
+            duplicate["action"] = "复制新增镜头"
+            edited_shots.append(duplicate)
+
+            edited = client.patch(
+                f"/projects/{project_id}/shots",
+                json={
+                    "expected_version": original["version"],
+                    "shots": edited_shots,
+                },
+            )
+            self.assertEqual(edited.status_code, 200)
+            edited_asset = edited.json()["asset"]
+            self.assertEqual(edited_asset["version"], original["version"] + 1)
+            self.assertEqual(
+                [shot["id"] for shot in edited_asset["payload"]["shots"][:2]],
+                ["S02", "S01"],
+            )
+            self.assertEqual(
+                [shot["start_ms"] for shot in edited_asset["payload"]["shots"][:3]],
+                [0, 3000, 6000],
+            )
+            self.assertIn(
+                "S11",
+                [shot["id"] for shot in edited_asset["payload"]["shots"]],
+            )
+            self.assertNotIn(
+                "S10",
+                [shot["id"] for shot in edited_asset["payload"]["shots"]],
+            )
+
+            invalid = deepcopy(edited_asset["payload"]["shots"])
+            invalid[0]["duration"] = 2
+            rejected = client.patch(
+                f"/projects/{project_id}/shots",
+                json={
+                    "expected_version": edited_asset["version"],
+                    "shots": invalid,
+                },
+            )
+            self.assertEqual(rejected.status_code, 422)
+            active_after_rejection = next(
+                item
+                for item in list_asset_versions(UUID(project_id), "shots")
+                if item["is_active"]
+            )
+            self.assertEqual(active_after_rejection["id"], edited_asset["id"])
+
+            mock_adapter = CountingShotAdapter()
+            original_adapter = main_module.adapter
+            main_module.adapter = mock_adapter
+            try:
+                local = client.post(
+                    f"/projects/{project_id}/shots/S02/regenerate",
+                    json={"expected_version": edited_asset["version"]},
+                )
+                self.assertEqual(local.status_code, 200)
+                local_asset = local.json()["asset"]
+                self.assertEqual(mock_adapter.single_calls, ["S02"])
+                self.assertEqual(mock_adapter.group_calls, 0)
+                changed = [
+                    shot["id"]
+                    for before, shot in zip(
+                        edited_asset["payload"]["shots"],
+                        local_asset["payload"]["shots"],
+                    )
+                    if before != shot
+                ]
+                self.assertEqual(changed, ["S02"])
+
+                blocked = client.post(
+                    f"/projects/{project_id}/shots/S01/regenerate",
+                    json={"expected_version": local_asset["version"]},
+                )
+                self.assertEqual(blocked.status_code, 409)
+
+                bulk = client.post(
+                    "/shots/create",
+                    json={"project_id": project_id},
+                )
+            finally:
+                main_module.adapter = original_adapter
+            self.assertEqual(bulk.status_code, 200)
+            locked_shot = next(
+                shot
+                for shot in bulk.json()["payload"]["shots"]
+                if shot["id"] == "S01"
+            )
+            self.assertEqual(locked_shot["action"], "这是被用户锁定的动作")
+            self.assertTrue(locked_shot["locked"])
+
     def test_character_references_lock_download_and_shot_version_integrity(self):
         with TestClient(app) as client:
             project_id = client.post(

@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .config import get_settings
-from .domain import CharacterAsset
+from .domain import CharacterAsset, ShotSetAsset, validate_domain_asset
 from .database import (
     create_project_record,
     create_render_job,
@@ -51,6 +51,9 @@ from .schemas import (
     SegmentConfirmRequest,
     SegmentConfirmationResponse,
     SegmentRecommendationsResponse,
+    ShotRegenerateRequest,
+    ShotSetMutationResponse,
+    ShotSetUpdateRequest,
     UploadResponse,
     WorldUpdateRequest,
     WorldUpdateResponse,
@@ -65,6 +68,12 @@ from .services.segments import (
     recommend_segments,
     restrict_context_to_confirmed_segment,
     validate_confirmed_segment,
+)
+from .services.shot_editor import (
+    ShotEditError,
+    canonicalize_shot_set,
+    preserve_locked_shots,
+    replace_single_shot,
 )
 from .services.storage import get_media_storage
 from .services.world import (
@@ -345,6 +354,11 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     result = generation.model.model_dump(mode="json")
     if kind == "world" and isinstance(current_same_kind, dict):
         result = preserve_locked_world_fields(
+            current_same_kind,
+            result,
+        ).model_dump(mode="json")
+    if kind == "shots" and isinstance(current_same_kind, dict):
+        result = preserve_locked_shots(
             current_same_kind,
             result,
         ).model_dump(mode="json")
@@ -844,6 +858,146 @@ def create_story(payload: ProjectRef) -> PipelineAsset:
 @app.post("/shots/create", response_model=PipelineAsset)
 def create_shots(payload: ProjectRef) -> PipelineAsset:
     return create_asset(payload.project_id, "shots")
+
+
+def _active_shot_asset(project_id: UUID) -> dict:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "shots")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active ShotSet not found")
+    return current
+
+
+def _assert_shot_version(current: dict, expected_version: int) -> None:
+    if int(current["version"]) != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "ShotSet version conflict",
+                "expected_version": expected_version,
+                "active_version": current["version"],
+            },
+        )
+
+
+@app.patch(
+    "/projects/{project_id}/shots",
+    response_model=ShotSetMutationResponse,
+)
+def update_project_shots(
+    project_id: UUID,
+    request: ShotSetUpdateRequest,
+) -> ShotSetMutationResponse:
+    current = _active_shot_asset(project_id)
+    _assert_shot_version(current, request.expected_version)
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    payload = {
+        **current["payload"],
+        "shots": request.shots,
+    }
+    try:
+        edited = canonicalize_shot_set(
+            payload,
+            target_duration=float(project["target_duration"]),
+        )
+        validated = validate_domain_asset(
+            "shots",
+            edited.model_dump(mode="json"),
+            load_context(project_id),
+        )
+    except (ShotEditError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    asset = insert_asset_version(
+        project_id,
+        "shots",
+        validated.model_dump(mode="json"),
+        activate=True,
+        provider="user",
+        model="shot-editor",
+        prompt="Edit, reorder, add, delete, duplicate, or lock Shot Cards",
+        input_snapshot=generation_input_snapshot(project_id, "shots"),
+    )
+    return ShotSetMutationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/shots/{shot_id}/regenerate",
+    response_model=ShotSetMutationResponse,
+)
+def regenerate_project_shot(
+    project_id: UUID,
+    shot_id: str,
+    request: ShotRegenerateRequest,
+) -> ShotSetMutationResponse:
+    current = _active_shot_asset(project_id)
+    _assert_shot_version(current, request.expected_version)
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    current_shot = next(
+        (
+            shot
+            for shot in current["payload"].get("shots", [])
+            if shot["id"] == shot_id
+        ),
+        None,
+    )
+    if not current_shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    context = load_context(project_id)
+    try:
+        context = restrict_context_to_confirmed_segment(context)
+        generated_shot = adapter.regenerate_shot(current_shot, context)
+        regenerated = replace_single_shot(
+            current["payload"],
+            shot_id,
+            generated_shot,
+            target_duration=float(project["target_duration"]),
+        )
+        regenerated = ShotSetAsset.model_validate(
+            validate_domain_asset(
+                "shots",
+                regenerated.model_dump(mode="json"),
+                context,
+            )
+        )
+    except ShotEditError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (AssetGenerationError, ValueError, StopIteration) as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Single-shot regeneration failed: {error}",
+        ) from error
+    except ProviderRequestError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Single-shot provider failed: {error}",
+        ) from error
+    asset = insert_asset_version(
+        project_id,
+        "shots",
+        regenerated.model_dump(mode="json"),
+        activate=True,
+        provider=adapter.provider_name,
+        model=adapter.model_name,
+        prompt=f"Regenerate only shot {shot_id}",
+        input_snapshot=generation_input_snapshot(project_id, "shots"),
+    )
+    return ShotSetMutationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
 
 
 @app.post("/render/start", status_code=202)

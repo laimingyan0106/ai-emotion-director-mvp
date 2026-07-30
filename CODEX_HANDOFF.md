@@ -347,3 +347,38 @@ docker compose up --build
   - 参考图随项目删除清理测试 PASS
   - 前端 4/4、ESLint、TypeScript、Next/Vinext 构建 PASS
 - 下一任务：`V11-T011`，实现 Shot Card 编辑、拖拽重排和单镜头局部再生成。
+
+### V11-T011：Shot Card 编辑与局部再生成
+
+- 状态：完成
+- Shot Schema 与服务端校验：
+  - Shot 新增 `start_ms` 与 `locked`
+  - 服务端忽略前端传入的起点顺序，按当前数组顺序重新计算 `start`/`start_ms`
+  - 所有镜头时长之和必须严格等于项目目标时长，否则返回 422
+  - 字段编辑、排序、增删、复制和锁定均插入新的 ShotSet 版本，不原地覆盖旧版本
+  - 每次保存继续校验 Character asset_id/version 引用完整性
+- 单镜头再生成：
+  - 新增 `DirectorAdapter.regenerate_shot` 独立边界
+  - 新增 `POST /projects/{project_id}/shots/{shot_id}/regenerate`
+  - 只替换目标镜头的景别、摄影机、动作、情绪与 Prompt
+  - 强制保留镜头 ID、起点、时长、角色引用与锁定状态
+  - 锁定镜头禁止局部再生成，必须显式解锁
+- 整组再生成与锁定：
+  - `/shots/create` 整组再生成时按 shot ID 恢复锁定镜头的创意字段
+  - 角色版本已变化时，锁定镜头的角色引用会安全更新到新激活版本
+  - 未锁定镜头由新结果替换
+- 前端：
+  - Shot Card 可编辑景别、摄影机、人物动作、情绪、时长与 Video Prompt
+  - 时间线支持 HTML5 拖拽重排
+  - 新增和复制会拆分当前镜头时长；删除会把时长归并到相邻镜头，保持总长
+  - 显示实时总时长、自动毫秒起点和锁定状态
+  - 支持保存新版本、单镜头局部再生成与整组再生成
+  - 存在未保存编辑时禁止局部/整组再生成，避免覆盖前端草稿
+- 验证结果：
+  - 后端 31/31 测试 PASS
+  - Shot reducer 重排、编辑、插入、删除及不可变性单元测试 PASS
+  - API 增删复制、版本化保存、start_ms 重算与总时长拒绝测试 PASS
+  - Mock 单镜头 Adapter 验证只调用一次且仅目标镜头变化 PASS
+  - 锁定镜头局部再生成拒绝、整组再生成保留测试 PASS
+  - 前端测试、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 下一任务：`V11-T012`，实现关键帧生成队列、重试、进度与导出包。

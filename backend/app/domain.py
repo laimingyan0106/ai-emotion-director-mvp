@@ -124,6 +124,7 @@ class CharacterVersionRef(StrictDomainModel):
 class ShotAsset(StrictDomainModel):
     id: ShotId
     start: float = Field(ge=0)
+    start_ms: int = Field(ge=0)
     duration: float = Field(gt=0, le=30)
     size: str = Field(min_length=1, max_length=80)
     camera: str = Field(min_length=1, max_length=240)
@@ -132,12 +133,15 @@ class ShotAsset(StrictDomainModel):
     character_ids: list[CharacterId] = Field(min_length=1, max_length=8)
     character_refs: list[CharacterVersionRef] = Field(min_length=1, max_length=8)
     prompt: str = Field(min_length=1, max_length=4000)
+    locked: bool = False
 
     @model_validator(mode="after")
     def references_match_character_ids(self) -> "ShotAsset":
         ref_ids = [reference.character_id for reference in self.character_refs]
         if sorted(set(ref_ids)) != sorted(set(self.character_ids)):
             raise ValueError("character_refs must cover every character_id exactly")
+        if self.start_ms != round(self.start * 1000):
+            raise ValueError("start_ms must equal start seconds converted to milliseconds")
         return self
 
 

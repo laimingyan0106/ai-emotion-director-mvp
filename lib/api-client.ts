@@ -337,3 +337,65 @@ export function characterReferenceUrl(
   );
   return `${configuredBaseUrl}${path}${download ? "?download=true" : ""}`;
 }
+
+export function createStory(projectId: string): Promise<{
+  project_id: string;
+  kind: "story";
+  payload: Record<string, unknown>;
+  asset_id: number;
+  version: number;
+  status: string;
+  is_active: boolean;
+}> {
+  return request("/story/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
+export function createShots(projectId: string): Promise<{
+  project_id: string;
+  kind: "shots";
+  payload: Record<string, unknown>;
+  asset_id: number;
+  version: number;
+  status: string;
+  is_active: boolean;
+}> {
+  return request("/shots/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
+export function updateShots(
+  projectId: string,
+  expectedVersion: number,
+  shots: Array<Record<string, unknown>>,
+): Promise<{ asset: AssetVersion; warnings: AssetDependencyWarning[] }> {
+  return request(`/projects/${encodeURIComponent(projectId)}/shots`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      shots,
+    }),
+  });
+}
+
+export function regenerateShot(
+  projectId: string,
+  shotId: string,
+  expectedVersion: number,
+): Promise<{ asset: AssetVersion; warnings: AssetDependencyWarning[] }> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/regenerate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_version: expectedVersion }),
+    },
+  );
+}

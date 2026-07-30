@@ -9,6 +9,8 @@ import {
   characterReferenceUrl,
   checkHealth,
   confirmSegment,
+  createShots,
+  createStory,
   createProject,
   createCharacter,
   createWorld,
@@ -21,11 +23,14 @@ import {
   generateCharacterReferences,
   ProjectSnapshot,
   SegmentCandidate,
+  regenerateShot,
   selectCharacterReferences,
+  updateShots,
   updateProject,
   updateWorld,
   uploadAudio,
 } from "../lib/api-client";
+import { reduceShotTimeline } from "../lib/shot-timeline";
 
 type Stage = "idle" | "analyzing" | "selecting" | "ready" | "rendering";
 type ConnectionState = "demo" | "checking" | "real" | "error";
@@ -46,6 +51,16 @@ type Shot = {
   emotion: string;
   prompt: string;
   color: string;
+  start?: number;
+  start_ms?: number;
+  duration?: number;
+  locked?: boolean;
+  character_ids?: string[];
+  character_refs?: Array<{
+    character_id: string;
+    asset_id: number;
+    version: number;
+  }>;
 };
 
 type CharacterReference = {
@@ -172,6 +187,7 @@ const shots: Shot[] = [
 ];
 
 const curve = [14, 18, 27, 38, 34, 48, 62, 58, 76, 88, 72, 91, 68, 54, 47, 62, 44, 31, 24, 18];
+const shotColors = ["#80d8d0", "#e7b56f", "#67a9c5", "#d9c47c", "#a7b7bc", "#c58b6f", "#9c81a7", "#70b6a7", "#e0a95b", "#f0cf8c"];
 
 function EmotionCurve({
   values = curve,
@@ -258,6 +274,12 @@ export default function Home() {
   const [characterBusy, setCharacterBusy] = useState(false);
   const [characterSelectedRefs, setCharacterSelectedRefs] = useState<string[]>([]);
   const [characterRisk, setCharacterRisk] = useState("");
+  const [storyAsset, setStoryAsset] = useState<AssetVersion | null>(null);
+  const [shotAsset, setShotAsset] = useState<AssetVersion | null>(null);
+  const [shotCards, setShotCards] = useState<Shot[]>(shots);
+  const [shotBusy, setShotBusy] = useState(false);
+  const [shotDirty, setShotDirty] = useState(false);
+  const [dragShotId, setDragShotId] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const lastSavedName = useRef(projectName);
 
@@ -314,8 +336,11 @@ export default function Home() {
 
   const completedStage = Math.min(stages.length, Math.floor((progress / 100) * stages.length));
   const statusText = stage === "idle" ? "等待素材" : stage === "analyzing" ? `音频分析中 ${progress}%` : stage === "selecting" ? "等待确认 30 秒片段" : stage === "rendering" ? "渲染中" : "方案已生成";
-  const chosenShot = shots[activeShot];
-  const totalDuration = useMemo(() => shots.length * 3, []);
+  const chosenShot = shotCards[activeShot] ?? shotCards[0] ?? shots[0];
+  const totalDuration = useMemo(
+    () => shotCards.reduce((sum, shot) => sum + Number(shot.duration ?? 3), 0),
+    [shotCards],
+  );
 
   function acceptFile(candidate?: File) {
     if (!candidate) return;
@@ -369,8 +394,12 @@ export default function Home() {
     const activeAnalysis = versions.groups.audio_analysis?.find((asset) => asset.is_active);
     const activeWorld = versions.groups.world?.find((asset) => asset.is_active) ?? null;
     const activeCharacter = versions.groups.character?.find((asset) => asset.is_active) ?? null;
+    const activeStory = versions.groups.story?.find((asset) => asset.is_active) ?? null;
+    const activeShots = versions.groups.shots?.find((asset) => asset.is_active) ?? null;
     hydrateWorld(activeWorld);
     hydrateCharacter(activeCharacter);
+    setStoryAsset(activeStory);
+    hydrateShots(activeShots);
     if (activeAnalysis) {
       const values = activeAnalysis.payload.energy_curve;
       if (Array.isArray(values)) {
@@ -439,6 +468,40 @@ export default function Home() {
     } else {
       setCharacterRisk("");
     }
+  }
+
+  function hydrateShots(asset: AssetVersion | null) {
+    setShotAsset(asset);
+    if (!asset || !Array.isArray(asset.payload.shots)) {
+      setShotCards(shots);
+      setShotDirty(false);
+      return;
+    }
+    const cards = (asset.payload.shots as Array<Record<string, unknown>>).map((item, index) => {
+      const start = Number(item.start || 0);
+      const duration = Number(item.duration || 0);
+      return {
+        id: String(item.id),
+        time: `${start.toFixed(1)}–${(start + duration).toFixed(1)}s`,
+        size: String(item.size || ""),
+        camera: String(item.camera || ""),
+        action: String(item.action || ""),
+        emotion: String(item.emotion || ""),
+        prompt: String(item.prompt || ""),
+        color: shotColors[index % shotColors.length],
+        start,
+        start_ms: Number(item.start_ms || 0),
+        duration,
+        locked: Boolean(item.locked),
+        character_ids: Array.isArray(item.character_ids) ? item.character_ids.map(String) : [],
+        character_refs: Array.isArray(item.character_refs)
+          ? item.character_refs as Shot["character_refs"]
+          : [],
+      };
+    });
+    setShotCards(cards);
+    setActiveShot((current) => Math.min(current, cards.length - 1));
+    setShotDirty(false);
   }
 
   function toggleWorldLock(path: string) {
@@ -553,6 +616,161 @@ export default function Home() {
       setApiError(error instanceof ApiError ? error.message : "角色参考图状态保存失败。");
     } finally {
       setCharacterBusy(false);
+    }
+  }
+
+  async function generateShotSet() {
+    if (!apiProjectId || !characterAsset) {
+      showToast("请先生成角色资产");
+      return;
+    }
+    setShotBusy(true);
+    setApiError("");
+    try {
+      if (!storyAsset) await createStory(apiProjectId);
+      await createShots(apiProjectId);
+      await restoreProjectSegment(apiProjectId);
+      showToast(shotAsset ? "整组镜头已重新生成，锁定镜头保持不变" : "ShotSet 已生成");
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "ShotSet 生成失败。");
+    } finally {
+      setShotBusy(false);
+    }
+  }
+
+  function updateShotCard(field: keyof Shot, value: string | number | boolean) {
+    setShotCards((current) => reduceShotTimeline(current, {
+      type: "update",
+      index: activeShot,
+      changes: { [field]: value } as Partial<Shot>,
+    }));
+    setShotDirty(true);
+  }
+
+  function nextShotId(cards: Shot[]): string | null {
+    const used = new Set(cards.map((shot) => shot.id));
+    for (let index = 1; index <= 99; index += 1) {
+      const candidate = `S${String(index).padStart(2, "0")}`;
+      if (!used.has(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  function addOrDuplicateShot(copyCurrent: boolean) {
+    const source = shotCards[activeShot];
+    const newId = nextShotId(shotCards);
+    if (!source || !newId) return;
+    const sourceDuration = Number(source.duration ?? 3);
+    if (sourceDuration < 0.2) {
+      showToast("当前镜头太短，无法继续拆分");
+      return;
+    }
+    const firstDuration = Number((sourceDuration / 2).toFixed(3));
+    const secondDuration = Number((sourceDuration - firstDuration).toFixed(3));
+    const created: Shot = {
+      ...source,
+      id: newId,
+      duration: secondDuration,
+      locked: false,
+      action: copyCurrent ? `${source.action}（副本）` : "新增镜头动作",
+      prompt: copyCurrent ? source.prompt : "待完善的单镜头生成 Prompt",
+      color: shotColors[shotCards.length % shotColors.length],
+    };
+    const split = reduceShotTimeline(shotCards, {
+      type: "update",
+      index: activeShot,
+      changes: { duration: firstDuration },
+    });
+    setShotCards(reduceShotTimeline(split, {
+      type: "insert",
+      index: activeShot + 1,
+      shot: created,
+    }));
+    setActiveShot(activeShot + 1);
+    setShotDirty(true);
+  }
+
+  function deleteCurrentShot() {
+    if (shotCards.length <= 1) return;
+    setShotCards(reduceShotTimeline(shotCards, {
+      type: "delete",
+      index: activeShot,
+    }));
+    setActiveShot(Math.min(activeShot, shotCards.length - 2));
+    setShotDirty(true);
+  }
+
+  function dropShotOn(targetId: string) {
+    if (!dragShotId || dragShotId === targetId) return;
+    const from = shotCards.findIndex((shot) => shot.id === dragShotId);
+    const to = shotCards.findIndex((shot) => shot.id === targetId);
+    if (from < 0 || to < 0) return;
+    setShotCards(reduceShotTimeline(shotCards, {
+      type: "reorder",
+      dragId: dragShotId,
+      targetId,
+    }));
+    setActiveShot(to);
+    setShotDirty(true);
+    setDragShotId("");
+  }
+
+  function serializeShotCards(): Array<Record<string, unknown>> {
+    return shotCards.map((shot) => ({
+      id: shot.id,
+      start: Number(shot.start ?? 0),
+      start_ms: Number(shot.start_ms ?? 0),
+      duration: Number(shot.duration ?? 0),
+      size: shot.size,
+      camera: shot.camera,
+      action: shot.action,
+      emotion: shot.emotion,
+      prompt: shot.prompt,
+      locked: Boolean(shot.locked),
+      character_ids: shot.character_ids ?? [],
+      character_refs: shot.character_refs ?? [],
+    }));
+  }
+
+  async function saveShotSet() {
+    if (!apiProjectId || !shotAsset) return;
+    setShotBusy(true);
+    setApiError("");
+    try {
+      const result = await updateShots(
+        apiProjectId,
+        shotAsset.version,
+        serializeShotCards(),
+      );
+      hydrateShots(result.asset);
+      showToast(`ShotSet v${result.asset.version} 已保存`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "ShotSet 保存失败。");
+    } finally {
+      setShotBusy(false);
+    }
+  }
+
+  async function regenerateCurrentShot() {
+    if (!apiProjectId || !shotAsset || !chosenShot) return;
+    if (shotDirty) {
+      showToast("请先保存当前编辑，再进行局部再生成");
+      return;
+    }
+    setShotBusy(true);
+    setApiError("");
+    try {
+      const result = await regenerateShot(
+        apiProjectId,
+        chosenShot.id,
+        shotAsset.version,
+      );
+      hydrateShots(result.asset);
+      showToast(`${chosenShot.id} 已局部再生成，其余镜头未变`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "单镜头再生成失败。");
+    } finally {
+      setShotBusy(false);
     }
   }
 
@@ -1173,11 +1391,41 @@ export default function Home() {
 
         {view === "shots" && (
           <div className="page studio-page">
-            <PageHeading overline="SHOT TIMELINE / 05" title="30 秒 · 10 个镜头" subtitle="镜头语言、人物动作、情绪与生成 Prompt 在同一张 Shot Card 中锁定。" ready={isReady} />
+            <PageHeading
+              overline={`SHOT TIMELINE / 05${shotAsset ? ` · V${shotAsset.version}` : ""}`}
+              title={`${totalDuration.toFixed(1)} 秒 · ${shotCards.length} 个镜头`}
+              subtitle="拖拽重排、编辑、增删复制和局部再生成都保存为新的 ShotSet 版本。"
+              ready={isReady}
+            />
+            {!shotAsset ? (
+              <section className="panel world-empty">
+                <span>SHOTSET</span>
+                <h3>生成可编辑的镜头时间线</h3>
+                <p>服务端将依据当前 World、Character 和 Story 版本生成镜头，并严格校验总时长。</p>
+                <button className="primary-button" disabled={shotBusy || !characterAsset} onClick={() => void generateShotSet()}>
+                  {shotBusy ? "生成中…" : "生成 ShotSet"}
+                </button>
+              </section>
+            ) : (
+            <>
+            <section className={Math.abs(totalDuration - 30) < 0.001 ? "shot-validation valid" : "shot-validation invalid"}>
+              <strong>总时长 {totalDuration.toFixed(3)}s / 30.000s</strong>
+              <span>{Math.abs(totalDuration - 30) < 0.001 ? "时间线有效" : "总时长不匹配，禁止保存和关键帧生成"}</span>
+            </section>
             <section className="timeline-strip">
-              {shots.map((shot, index) => (
-                <button key={shot.id} className={activeShot === index ? "shot-chip active" : "shot-chip"} onClick={() => setActiveShot(index)}>
-                  <i style={{ background: shot.color }} /><span>{shot.id}</span><small>{shot.time}</small>
+              {shotCards.map((shot, index) => (
+                <button
+                  key={shot.id}
+                  className={activeShot === index ? "shot-chip active" : "shot-chip"}
+                  draggable
+                  onDragStart={() => setDragShotId(shot.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => dropShotOn(shot.id)}
+                  onClick={() => setActiveShot(index)}
+                >
+                  <i style={{ background: shot.color }} />
+                  <span>{shot.id}{shot.locked ? " · LOCK" : ""}</span>
+                  <small>{shot.time}</small>
                 </button>
               ))}
             </section>
@@ -1191,18 +1439,36 @@ export default function Home() {
               </section>
               <section className="shot-card panel">
                 <div className="panel-title"><span>SHOT CARD</span><strong>{chosenShot.action}</strong></div>
-                <div className="shot-fields">
-                  <Field label="景别" value={chosenShot.size} />
-                  <Field label="摄影机" value={chosenShot.camera} />
-                  <Field label="人物 / 动作" value={chosenShot.action} />
-                  <Field label="情绪" value={chosenShot.emotion} />
+                <div className="shot-editor-grid">
+                  <label><span>景别</span><input aria-label="景别" value={chosenShot.size} onChange={(event) => updateShotCard("size", event.target.value)} /></label>
+                  <label><span>摄影机</span><input aria-label="摄影机" value={chosenShot.camera} onChange={(event) => updateShotCard("camera", event.target.value)} /></label>
+                  <label><span>人物 / 动作</span><textarea aria-label="人物 / 动作" value={chosenShot.action} onChange={(event) => updateShotCard("action", event.target.value)} /></label>
+                  <label><span>情绪</span><input aria-label="情绪" value={chosenShot.emotion} onChange={(event) => updateShotCard("emotion", event.target.value)} /></label>
+                  <label><span>时长（秒）</span><input aria-label="时长（秒）" type="number" min=".1" max="30" step=".1" value={chosenShot.duration ?? 3} onChange={(event) => updateShotCard("duration", Number(event.target.value))} /></label>
+                  <div className="shot-start-readonly"><span>自动起点</span><strong>{chosenShot.start_ms ?? 0} ms</strong></div>
                 </div>
                 <div className="prompt-box">
-                  <span>VIDEO PROMPT</span><p>{chosenShot.prompt}</p>
+                  <span>VIDEO PROMPT</span>
+                  <textarea aria-label="Video Prompt" value={chosenShot.prompt} onChange={(event) => updateShotCard("prompt", event.target.value)} />
                   <button onClick={() => { navigator.clipboard.writeText(chosenShot.prompt); showToast("Prompt 已复制"); }}>复制 Prompt</button>
+                </div>
+                <div className="shot-editor-actions">
+                  <button className={chosenShot.locked ? "world-lock active" : "world-lock"} onClick={() => updateShotCard("locked", !chosenShot.locked)}>
+                    {chosenShot.locked ? "镜头已锁定" : "锁定镜头"}
+                  </button>
+                  <button className="ghost-button" onClick={() => addOrDuplicateShot(false)}>新增</button>
+                  <button className="ghost-button" onClick={() => addOrDuplicateShot(true)}>复制</button>
+                  <button className="text-button" onClick={deleteCurrentShot} disabled={shotCards.length <= 1}>删除</button>
+                  <button className="ghost-button" disabled={shotBusy || shotDirty || Boolean(chosenShot.locked)} onClick={() => void regenerateCurrentShot()}>局部再生成</button>
+                  <button className="primary-button" disabled={shotBusy || !shotDirty || Math.abs(totalDuration - 30) >= 0.001} onClick={() => void saveShotSet()}>
+                    {shotBusy ? "保存中…" : "保存新版本"}
+                  </button>
+                  <button className="text-button" disabled={shotBusy || shotDirty} onClick={() => void generateShotSet()}>整组重新生成</button>
                 </div>
               </section>
             </div>
+            </>
+            )}
           </div>
         )}
 
@@ -1230,9 +1496,9 @@ export default function Home() {
             <section className="panel queue-panel">
               <div className="panel-title"><span>RENDER QUEUE</span><strong>镜头任务</strong></div>
               <div className="queue-head"><span>镜头</span><span>内容</span><span>时长</span><span>状态</span></div>
-              {shots.map((shot, index) => (
+              {shotCards.map((shot, index) => (
                 <div className="queue-row" key={shot.id}>
-                  <span>{shot.id}</span><strong>{shot.action}</strong><span>3.0s</span>
+                  <span>{shot.id}</span><strong>{shot.action}</strong><span>{Number(shot.duration ?? 3).toFixed(1)}s</span>
                   <Badge tone={stage === "rendering" && index < 6 ? "success" : index === 0 || stage === "ready" ? "neutral" : "gold"}>
                     {stage === "rendering" ? (index < 6 ? "完成" : index === 6 ? "渲染中" : "排队") : "待渲染"}
                   </Badge>

@@ -39,6 +39,8 @@ docker compose up --build
 - `POST /projects/{project_id}/characters/references/generate`
 - `PATCH /projects/{project_id}/characters/references`
 - `GET /projects/{project_id}/character-assets/{asset_id}/references/{reference_id}`
+- `PATCH /projects/{project_id}/shots`
+- `POST /projects/{project_id}/shots/{shot_id}/regenerate`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -62,6 +64,7 @@ docker compose up --build
 - `ADAPTER_MODE=provider` 且配置 `LLM_API_KEY`/`OPENAI_API_KEY` 时使用 OpenAI Responses API；模型默认 `gpt-5.6-terra` 并可由 `LLM_MODEL` 覆盖。缺少密钥或 Provider 不支持时自动回落完整 Demo，并在 `/health` 的实际 adapter 与 fallback reason 中明确显示。
 - World Bible v1.1 将稳定规则与可变状态分开保存；World Studio 支持结构化字段编辑、字段锁定和重新生成，锁定值不会在再生成时漂移，镜头资产会记录明确的 World asset/version 输入快照。
 - Character Asset v1.1 保存负面约束、Provider 绑定和 portrait/half/full 三类参考图；用户确认并锁定后，镜头同时记录 character_id、asset_id 和 version。未完成三类参考图确认时，界面明确提示仅凭文本无法保证人物一致。
+- ShotSet v1.1 支持字段编辑、拖拽重排、新增、删除、复制、镜头锁定和单镜头局部再生成；所有写入创建新版本，服务端重算 `start_ms` 并严格校验总时长，锁定镜头不会被整组重新生成覆盖。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 

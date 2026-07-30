@@ -35,6 +35,18 @@ class DirectorAdapter(ABC):
         """Retry hook for providers; demo mode deterministically regenerates."""
         return self.generate(task, context)
 
+    def regenerate_shot(
+        self,
+        current_shot: dict[str, Any],
+        context: dict[str, Any],
+    ) -> Any:
+        generated = self.generate("shots", context)
+        return next(
+            shot
+            for shot in generated["shots"]
+            if shot["id"] == current_shot["id"]
+        )
+
 
 class DemoDirectorAdapter(DirectorAdapter):
     """Deterministic fallback used until provider credentials are configured."""
@@ -166,6 +178,7 @@ class DemoDirectorAdapter(DirectorAdapter):
                 {
                     "id": f"S{index:02d}",
                     "start": start,
+                    "start_ms": start * 1000,
                     "duration": 3,
                     "size": size,
                     "camera": camera,
@@ -180,6 +193,7 @@ class DemoDirectorAdapter(DirectorAdapter):
                         }
                     ],
                     "prompt": f"Cinematic shot: {action}; {camera}; poetic retro-futurism; midnight cyan and memory amber; consistent character CHAR-001; 16:9",
+                    "locked": False,
                 }
             )
         return {"duration": 30, "fps": 24, "aspect_ratio": "16:9", "shots": shots}
@@ -236,6 +250,27 @@ class ProviderDirectorAdapter(DirectorAdapter):
             prompt=repair_prompt,
             schema_name=f"emotion_director_{task}",
             schema=DOMAIN_MODELS[task].model_json_schema(),
+        )
+
+    def regenerate_shot(
+        self,
+        current_shot: dict[str, Any],
+        context: dict[str, Any],
+    ) -> Any:
+        prompt = (
+            "Regenerate only this single shot's creative fields. Preserve its id, "
+            "timing, character references, and lock state exactly. Return one ShotAsset.\n"
+            f"CURRENT_SHOT:\n{json.dumps(current_shot, ensure_ascii=False)}\n"
+            f"CONTEXT:\n{json.dumps(prompt_context_for_task('shots', context), ensure_ascii=False, default=str)}"
+        )
+        from ..domain import ShotAsset
+
+        return self.client.create_structured(
+            model=self.model_name,
+            instructions=self.instructions,
+            prompt=prompt,
+            schema_name="emotion_director_single_shot",
+            schema=ShotAsset.model_json_schema(),
         )
 
 

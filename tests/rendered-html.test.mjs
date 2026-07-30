@@ -36,7 +36,7 @@ test("starter preview has been removed", async () => {
   assert.doesNotMatch(page, /SkeletonPreview/);
   assert.doesNotMatch(layout, /Starter Project/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
-  assert.match(page, /shots\.length \* 3/);
+  assert.match(page, /shotCards\.reduce/);
 });
 
 test("World Studio exposes structured versioned editing controls", async () => {
@@ -64,4 +64,21 @@ test("Character Studio exposes reference generation and version locking", async 
   assert.match(client, /generateCharacterReferences/);
   assert.match(client, /selectCharacterReferences/);
   assert.match(client, /characterReferenceUrl/);
+});
+
+test("Shot Studio exposes server-versioned editing and local regeneration", async () => {
+  const [page, client, reducer] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("lib/api-client.ts", root), "utf8"),
+    readFile(new URL("lib/shot-timeline.ts", root), "utf8"),
+  ]);
+  assert.match(page, /draggable/);
+  assert.match(page, /onDrop/);
+  assert.match(page, /保存新版本/);
+  assert.match(page, /局部再生成/);
+  assert.match(page, /总时长不匹配，禁止保存和关键帧生成/);
+  assert.match(client, /export function updateShots/);
+  assert.match(client, /export function regenerateShot/);
+  assert.match(reducer, /start_ms/);
+  assert.match(reducer, /reduceShotTimeline/);
 });

@@ -144,6 +144,20 @@ class CharacterReferenceResponse(BaseModel):
     consistency_risk: str | None = None
 
 
+class ShotSetUpdateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    shots: list[dict[str, Any]] = Field(min_length=1, max_length=60)
+
+
+class ShotRegenerateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+
+
+class ShotSetMutationResponse(BaseModel):
+    asset: AssetVersion
+    warnings: list[AssetDependencyWarning] = Field(default_factory=list)
+
+
 class ProjectResponse(BaseModel):
     id: UUID
     name: str
