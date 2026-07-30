@@ -123,9 +123,12 @@ class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
             )
         if response.status_code >= 400:
             request_id = response.headers.get("x-request-id", "unknown")
+            detail = sanitize_provider_error(
+                RuntimeError(response.text[:500] or "empty response")
+            )
             raise RuntimeError(
                 f"OpenAI image request failed with HTTP {response.status_code}; "
-                f"request_id={request_id}"
+                f"request_id={request_id}; detail={detail}"
             )
         try:
             payload = response.json()

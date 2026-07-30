@@ -69,6 +69,7 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
         message = str(raised.exception)
         self.assertNotIn("sk-testing-only", message)
         self.assertNotIn("should-not-leak", message)
+        self.assertIn("detail=", message)
 
     async def test_openai_provider_downloads_url_response(self):
         image = b"\x89PNG\r\n\x1a\nrelay-url-test"
