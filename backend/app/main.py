@@ -1122,6 +1122,10 @@ async def start_keyframes(
         for task in (current["payload"]["tasks"] if current else [])
         if task.get("confirmed")
     }
+    current_by_shot = {
+        task["shot_id"]: task
+        for task in (current["payload"]["tasks"] if current else [])
+    }
     tasks = []
     for shot in context["assets"]["shots"]["shots"]:
         if shot["id"] in confirmed_by_shot:
@@ -1133,6 +1137,7 @@ async def start_keyframes(
             context=context,
             adapter=keyframe_image_adapter,
             media_storage=media_storage,
+            attempt=int(current_by_shot.get(shot["id"], {}).get("attempt", 0)) + 1,
         )
         tasks.append(task.model_dump(mode="json"))
     asset = _persist_keyframes(

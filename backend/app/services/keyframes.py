@@ -175,8 +175,12 @@ async def generate_keyframe_task(
             "image/jpeg": "jpg",
             "image/webp": "webp",
         }[generated.content_type]
+        object_revision = uuid4().hex[:12]
         storage_path = await media_storage.put(
-            f"projects/{project_id}/keyframes/{shot['id']}-a{attempt}.{extension}",
+            (
+                f"projects/{project_id}/keyframes/"
+                f"{shot['id']}-a{attempt}-{object_revision}.{extension}"
+            ),
             io.BytesIO(generated.content),
             content_type=generated.content_type,
         )

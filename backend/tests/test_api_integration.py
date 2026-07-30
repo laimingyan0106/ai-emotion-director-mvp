@@ -261,6 +261,8 @@ class ApiIntegrationTest(unittest.TestCase):
                     json={"expected_shots_version": shots["version"]},
                 )
                 self.assertEqual(regrouped.status_code, 200)
+                self.assertEqual(regrouped.json()["progress"]["succeeded"], 10)
+                self.assertEqual(regrouped.json()["progress"]["failed"], 0)
                 s01_after = next(
                     task
                     for task in regrouped.json()["asset"]["payload"]["tasks"]
@@ -270,6 +272,19 @@ class ApiIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     s01_after["provider_task_id"],
                     s01_before["provider_task_id"],
+                )
+                self.assertTrue(
+                    all(
+                        task["attempt"]
+                        == (
+                            1
+                            if task["shot_id"] == "S01"
+                            else 3
+                            if task["shot_id"] == "S04"
+                            else 2
+                        )
+                        for task in regrouped.json()["asset"]["payload"]["tasks"]
+                    )
                 )
 
                 image = client.get(
