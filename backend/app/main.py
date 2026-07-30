@@ -1,33 +1,134 @@
-import json
+import asyncio
 from contextlib import asynccontextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
+from io import BytesIO
+import json
 from pathlib import Path
+import tempfile
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .config import get_settings
-from .database import database
-from .schemas import CharacterRequest, PipelineAsset, ProjectCreate, ProjectRef, ProjectResponse, RenderRequest, UploadResponse
+from .domain import (
+    CharacterAsset,
+    KeyframeSetAsset,
+    ShotSetAsset,
+    validate_domain_asset,
+)
+from .database import (
+    create_project_record,
+    create_render_job,
+    delete_project_record,
+    activate_asset_version,
+    database,
+    get_active_asset_snapshot,
+    get_asset_dependency_warnings,
+    get_latest_audio,
+    get_project_record,
+    insert_asset_version,
+    list_asset_versions,
+    list_project_records,
+    load_project_context,
+    save_audio_analysis,
+    save_audio_record,
+    update_project_record,
+)
+from .schemas import (
+    AssetActivateRequest,
+    AssetActivationResponse,
+    AssetVersion,
+    AssetVersionsResponse,
+    CharacterReferenceGenerateRequest,
+    CharacterReferenceResponse,
+    CharacterReferenceSelectionRequest,
+    CharacterRequest,
+    KeyframeConfirmationRequest,
+    KeyframeGenerateRequest,
+    KeyframeMutationRequest,
+    KeyframeMutationResponse,
+    KeyframeProgress,
+    PipelineAsset,
+    ProjectCreate,
+    ProjectListResponse,
+    ProjectRef,
+    ProjectResponse,
+    ProjectSnapshot,
+    ProjectUpdate,
+    RenderRequest,
+    SegmentConfirmRequest,
+    SegmentConfirmationResponse,
+    SegmentRecommendationsResponse,
+    ShotRegenerateRequest,
+    ShotSetMutationResponse,
+    ShotSetUpdateRequest,
+    UploadResponse,
+    WorldUpdateRequest,
+    WorldUpdateResponse,
+)
 from .services.adapters import get_director_adapter
-from .services.audio import probe_audio
+from .services.audio import analyze_audio_file, demo_analysis
+from .services.character_references import get_character_image_adapter
+from .services.generation import AssetGenerationError, generate_validated_asset
+from .services.keyframes import (
+    build_keyframe_zip,
+    generate_keyframe_task,
+    get_keyframe_image_adapter,
+    keyframe_consistency_warnings,
+    keyframe_progress,
+    manifest_document,
+    render_manifest_pdf,
+)
+from .services.jianying import build_jianying_package
+from .services.observability import (
+    StructuredRequestLogMiddleware,
+    log_event,
+    public_error,
+)
+from .services.providers import ProviderRequestError
+from .services.segments import (
+    SegmentSelectionError,
+    recommend_segments,
+    restrict_context_to_confirmed_segment,
+    validate_confirmed_segment,
+)
+from .services.shot_editor import (
+    ShotEditError,
+    canonicalize_shot_set,
+    preserve_locked_shots,
+    replace_single_shot,
+)
+from .services.storage import get_media_storage
+from .services.world import (
+    WorldEditError,
+    edit_world,
+    preserve_locked_world_fields,
+)
 
 settings = get_settings()
 adapter = get_director_adapter()
+media_storage = get_media_storage()
+character_image_adapter = get_character_image_adapter()
+keyframe_image_adapter = get_keyframe_image_adapter(settings)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    settings.media_root.mkdir(parents=True, exist_ok=True)
+    settings.resolved_media_root.mkdir(parents=True, exist_ok=True)
     database.open()
     yield
     database.close()
 
 
-app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.1.0", lifespan=lifespan)
+app.add_middleware(StructuredRequestLogMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,20 +136,70 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "adapter": settings.adapter_mode}
+def health() -> dict[str, str | bool | None]:
+    return {
+        "status": "ok",
+        "adapter": adapter.provider_name,
+        "adapter_configured": settings.adapter_mode,
+        "adapter_fallback_reason": adapter.fallback_reason,
+        "director_model": adapter.model_name,
+        "storage": settings.resolved_storage_mode,
+        "durable_storage": settings.resolved_storage_mode == "postgres",
+        "media_storage": settings.resolved_media_storage_mode,
+        "keyframe_provider": keyframe_image_adapter.provider,
+        "keyframe_model": keyframe_image_adapter.model,
+        "keyframe_fallback_reason": keyframe_image_adapter.fallback_reason,
+    }
 
 
 @app.post("/project/create", response_model=ProjectResponse, status_code=201)
 def create_project(payload: ProjectCreate) -> ProjectResponse:
     project_id = uuid4()
-    with database.connection() as connection:
-        connection.execute(
-            "INSERT INTO projects(id, name, target_duration) VALUES (%s, %s, %s)",
-            (project_id, payload.name, payload.target_duration),
-        )
-        connection.commit()
+    create_project_record(project_id, payload.name, payload.target_duration)
     return ProjectResponse(id=project_id, name=payload.name, target_duration=payload.target_duration, status="draft")
+
+
+@app.get("/project/{project_id}", response_model=ProjectSnapshot)
+def get_project(project_id: UUID) -> ProjectSnapshot:
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectSnapshot.model_validate(project)
+
+
+@app.get("/projects", response_model=ProjectListResponse)
+def list_projects() -> ProjectListResponse:
+    items = [
+        ProjectSnapshot.model_validate(get_project_record(project["id"]) or project)
+        for project in list_project_records()
+    ]
+    return ProjectListResponse(items=items, total=len(items))
+
+
+@app.get("/projects/{project_id}", response_model=ProjectSnapshot)
+def get_project_detail(project_id: UUID) -> ProjectSnapshot:
+    return get_project(project_id)
+
+
+@app.patch("/projects/{project_id}", response_model=ProjectSnapshot)
+def update_project(project_id: UUID, payload: ProjectUpdate) -> ProjectSnapshot:
+    project = update_project_record(
+        project_id,
+        name=payload.name,
+        target_duration=payload.target_duration,
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectSnapshot.model_validate(project)
+
+
+@app.delete("/projects/{project_id}", status_code=204)
+async def delete_project(project_id: UUID) -> None:
+    storage_paths = delete_project_record(project_id)
+    if storage_paths is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    for storage_path in storage_paths:
+        await media_storage.delete(storage_path)
 
 
 @app.post("/audio/upload", response_model=UploadResponse, status_code=201)
@@ -58,64 +209,420 @@ async def upload_audio(project_id: UUID = Form(...), audio: UploadFile = File(..
         raise HTTPException(status_code=415, detail="Unsupported audio format")
     audio_id = uuid4()
     extension = Path(audio.filename or "audio.bin").suffix.lower()
-    target = settings.media_root / str(project_id) / f"{audio_id}{extension}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    size = 0
-    with target.open("wb") as output:
-        while chunk := await audio.read(1024 * 1024):
-            size += len(chunk)
-            if size > 200 * 1024 * 1024:
-                target.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="Audio exceeds 200MB")
-            output.write(chunk)
-    with database.connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO audio_assets(id, project_id, filename, storage_path, content_type, size_bytes)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (audio_id, project_id, audio.filename, str(target), audio.content_type, size),
-        )
-        connection.commit()
-    return UploadResponse(project_id=project_id, audio_id=audio_id, filename=audio.filename or target.name, size=size, status="uploaded")
+    if not get_project_record(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    data = await audio.read(200 * 1024 * 1024 + 1)
+    size = len(data)
+    if size > 200 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio exceeds 200MB")
+    pathname = f"projects/{project_id}/audio/{audio_id}{extension}"
+    storage_path = await media_storage.put(
+        pathname,
+        BytesIO(data),
+        content_type=audio.content_type,
+    )
+    save_audio_record(audio_id, project_id, audio.filename or f"{audio_id}{extension}", storage_path, audio.content_type, size)
+    return UploadResponse(project_id=project_id, audio_id=audio_id, filename=audio.filename or f"{audio_id}{extension}", size=size, status="uploaded")
 
 
 @app.post("/audio/analyze", response_model=PipelineAsset)
-def analyze_audio(payload: ProjectRef) -> PipelineAsset:
-    with database.connection() as connection:
-        row = connection.execute(
-            "SELECT id, storage_path FROM audio_assets WHERE project_id = %s ORDER BY created_at DESC LIMIT 1",
-            (payload.project_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="No audio uploaded for project")
-        analysis = probe_audio(Path(row["storage_path"]))
-        connection.execute(
-            "UPDATE audio_assets SET analysis = %s::jsonb WHERE id = %s",
-            (json.dumps(analysis, ensure_ascii=False), row["id"]),
+async def analyze_audio(payload: ProjectRef) -> PipelineAsset:
+    row = get_latest_audio(payload.project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No audio uploaded for project")
+    analysis = row.get("analysis")
+    active_analysis = next(
+        (
+            asset
+            for asset in list_asset_versions(payload.project_id, "audio_analysis")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if analysis and active_analysis and active_analysis["payload"] == analysis:
+        return PipelineAsset(
+            project_id=payload.project_id,
+            kind="audio_analysis",
+            payload=analysis,
+            asset_id=active_analysis["id"],
+            version=active_analysis["version"],
+            status=active_analysis["status"],
+            is_active=active_analysis["is_active"],
         )
-        connection.commit()
-    database.insert_asset(payload.project_id, "audio_analysis", analysis)
-    return PipelineAsset(project_id=payload.project_id, kind="audio_analysis", payload=analysis)
+    if analysis is None:
+        try:
+            audio_bytes = await media_storage.read(str(row["storage_path"]))
+            with tempfile.TemporaryDirectory(prefix="emotion-director-analysis-") as directory:
+                suffix = Path(str(row.get("filename") or "audio.bin")).suffix or ".bin"
+                analysis_path = Path(directory) / f"source{suffix}"
+                analysis_path.write_bytes(audio_bytes)
+                analysis = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        analyze_audio_file,
+                        analysis_path,
+                        max_duration_seconds=settings.audio_analysis_max_seconds,
+                        decode_timeout_seconds=min(
+                            settings.audio_analysis_timeout_seconds,
+                            30,
+                        ),
+                    ),
+                    timeout=settings.audio_analysis_timeout_seconds,
+                )
+        except TimeoutError:
+            analysis = demo_analysis(
+                degraded=True,
+                reason=(
+                    "analysis_timeout_"
+                    f"{settings.audio_analysis_timeout_seconds}s"
+                ),
+            )
+        except Exception as error:
+            analysis = demo_analysis(
+                degraded=True,
+                reason=f"media_read_or_analysis_failed:{error}",
+            )
+    save_audio_analysis(row["id"], analysis)
+    asset = insert_asset_version(
+        payload.project_id,
+        "audio_analysis",
+        analysis,
+        activate=True,
+        provider="local",
+        model=str(analysis.get("analysis_version", "audio-analysis")),
+        input_snapshot={
+            "audio": {
+                "audio_id": str(row["id"]),
+                "source_sha256": analysis.get("source_sha256"),
+            }
+        },
+    )
+    return PipelineAsset(
+        project_id=payload.project_id,
+        kind="audio_analysis",
+        payload=analysis,
+        asset_id=asset["id"],
+        version=asset["version"],
+        status=asset["status"],
+        is_active=asset["is_active"],
+    )
 
 
 def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     context = load_context(project_id)
-    result = adapter.generate(kind, context)
-    database.insert_asset(project_id, kind, result)
-    return PipelineAsset(project_id=project_id, kind=kind, payload=result)
+    try:
+        context = restrict_context_to_confirmed_segment(context)
+    except SegmentSelectionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    current_same_kind = context.get("assets", {}).get(kind)
+    if (
+        kind == "character"
+        and isinstance(current_same_kind, dict)
+        and current_same_kind.get("locked")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Unlock the active Character Asset before regenerating it",
+        )
+    input_snapshot = generation_input_snapshot(project_id, kind)
+    prompt = adapter.build_prompt(kind, context)
+    try:
+        generation = generate_validated_asset(
+            adapter,
+            kind,
+            context,
+            retry_attempts=settings.generation_retry_attempts,
+        )
+    except AssetGenerationError as error:
+        insert_asset_version(
+            project_id,
+            kind,
+            error.last_payload,
+            activate=False,
+            provider=adapter.provider_name,
+            model=adapter.model_name,
+            prompt=prompt,
+            input_snapshot=input_snapshot,
+            validation_errors=error.validation_errors,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(error),
+                "validation_errors": error.validation_errors,
+            },
+        ) from error
+    except ProviderRequestError as error:
+        validation_errors = [
+            {
+                "attempt": 1,
+                "location": [],
+                "type": error.__class__.__name__,
+                "message": str(error),
+                "status_code": error.status_code,
+                "retryable": error.retryable,
+            }
+        ]
+        insert_asset_version(
+            project_id,
+            kind,
+            {},
+            activate=False,
+            provider=adapter.provider_name,
+            model=adapter.model_name,
+            prompt=prompt,
+            input_snapshot=input_snapshot,
+            validation_errors=validation_errors,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Director provider request failed",
+                "provider": adapter.provider_name,
+                "model": adapter.model_name,
+                "errors": validation_errors,
+            },
+        ) from error
+    result = generation.model.model_dump(mode="json")
+    if kind == "world" and isinstance(current_same_kind, dict):
+        result = preserve_locked_world_fields(
+            current_same_kind,
+            result,
+        ).model_dump(mode="json")
+    if kind == "shots" and isinstance(current_same_kind, dict):
+        result = preserve_locked_shots(
+            current_same_kind,
+            result,
+        ).model_dump(mode="json")
+    asset = insert_asset_version(
+        project_id,
+        kind,
+        result,
+        activate=True,
+        provider=adapter.provider_name,
+        model=adapter.model_name,
+        prompt=prompt,
+        input_snapshot=input_snapshot,
+        validation_errors=generation.validation_errors,
+    )
+    return PipelineAsset(
+        project_id=project_id,
+        kind=kind,
+        payload=result,
+        asset_id=asset["id"],
+        version=asset["version"],
+        status=asset["status"],
+        is_active=asset["is_active"],
+    )
 
 
 def load_context(project_id: UUID) -> dict:
-    with database.connection() as connection:
-        project = connection.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        assets = connection.execute(
-            "SELECT kind, payload FROM generated_assets WHERE project_id = %s ORDER BY created_at",
-            (project_id,),
-        ).fetchall()
-    return {"project": dict(project), "assets": {row["kind"]: row["payload"] for row in assets}}
+    context = load_project_context(project_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return context
+
+
+def generation_input_snapshot(
+    project_id: UUID,
+    kind: str,
+) -> dict[str, dict[str, int]]:
+    dependencies = {
+        "world": {"audio_analysis", "segment"},
+        "character": {"audio_analysis", "segment", "world"},
+        "story": {"audio_analysis", "segment", "world", "character"},
+        "shots": {"audio_analysis", "segment", "world", "character", "story"},
+        "keyframes": {"world", "character", "shots"},
+    }
+    snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
+    return {
+        asset_kind: reference
+        for asset_kind, reference in snapshot.items()
+        if asset_kind in dependencies.get(kind, set())
+    }
+
+
+@app.get("/projects/{project_id}/assets", response_model=AssetVersionsResponse)
+def get_project_assets(project_id: UUID) -> AssetVersionsResponse:
+    if not get_project_record(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    groups: dict[str, list[AssetVersion]] = {}
+    for asset in list_asset_versions(project_id):
+        groups.setdefault(asset["kind"], []).append(AssetVersion.model_validate(asset))
+    return AssetVersionsResponse(
+        project_id=project_id,
+        groups=groups,
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/assets/{kind}/activate",
+    response_model=AssetActivationResponse,
+)
+def activate_project_asset(
+    project_id: UUID,
+    kind: str,
+    payload: AssetActivateRequest,
+) -> AssetActivationResponse:
+    try:
+        asset = activate_asset_version(
+            project_id,
+            kind,
+            asset_id=payload.asset_id,
+            version=payload.version,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset version not found")
+    return AssetActivationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.get(
+    "/projects/{project_id}/segments/recommendations",
+    response_model=SegmentRecommendationsResponse,
+)
+def get_segment_recommendations(
+    project_id: UUID,
+) -> SegmentRecommendationsResponse:
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    analysis_asset = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "audio_analysis")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not analysis_asset:
+        raise HTTPException(
+            status_code=409,
+            detail="Analyze audio before selecting a segment",
+        )
+    analysis = analysis_asset["payload"]
+    try:
+        candidates = recommend_segments(
+            analysis,
+            target_duration=float(project["target_duration"]),
+        )
+    except SegmentSelectionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return SegmentRecommendationsResponse(
+        project_id=project_id,
+        target_duration=float(project["target_duration"]),
+        audio_duration=float(analysis["duration"]),
+        candidates=candidates,
+    )
+
+
+@app.post(
+    "/projects/{project_id}/segments/confirm",
+    response_model=SegmentConfirmationResponse,
+)
+def confirm_project_segment(
+    project_id: UUID,
+    payload: SegmentConfirmRequest,
+) -> SegmentConfirmationResponse:
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    audio = get_latest_audio(project_id)
+    analysis_asset = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "audio_analysis")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not audio or not analysis_asset:
+        raise HTTPException(
+            status_code=409,
+            detail="Analyze audio before selecting a segment",
+        )
+    try:
+        segment = validate_confirmed_segment(
+            start=payload.start,
+            end=payload.end,
+            category=payload.category,
+            label=payload.label,
+            target_duration=float(project["target_duration"]),
+            audio_duration=float(analysis_asset["payload"]["duration"]),
+            audio_id=str(audio["id"]),
+            audio_analysis_asset_id=int(analysis_asset["id"]),
+        )
+    except SegmentSelectionError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    snapshot = get_active_asset_snapshot(project_id, exclude_kind="segment")
+    asset = insert_asset_version(
+        project_id,
+        "segment",
+        segment.model_dump(mode="json"),
+        activate=True,
+        provider="user",
+        model="manual-confirmation",
+        input_snapshot={"audio_analysis": snapshot["audio_analysis"]},
+    )
+    return SegmentConfirmationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.patch(
+    "/projects/{project_id}/world",
+    response_model=WorldUpdateResponse,
+)
+def update_project_world(
+    project_id: UUID,
+    payload: WorldUpdateRequest,
+) -> WorldUpdateResponse:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "world")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active World not found")
+    if int(current["version"]) != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "World version conflict",
+                "expected_version": payload.expected_version,
+                "active_version": current["version"],
+            },
+        )
+    try:
+        edited = edit_world(
+            current["payload"],
+            changes=payload.changes,
+            locked_fields=payload.locked_fields,
+        )
+    except (WorldEditError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    asset = insert_asset_version(
+        project_id,
+        "world",
+        edited.model_dump(mode="json"),
+        activate=True,
+        provider="user",
+        model="world-studio",
+        prompt="Manual structured World Studio edit",
+        input_snapshot=generation_input_snapshot(project_id, "world"),
+    )
+    return WorldUpdateResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
 
 
 @app.post("/world/create", response_model=PipelineAsset)
@@ -128,6 +635,253 @@ def create_character(payload: CharacterRequest) -> PipelineAsset:
     return create_asset(payload.project_id, "character")
 
 
+def _active_character_asset(project_id: UUID) -> dict:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "character")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active Character Asset not found")
+    return current
+
+
+def _assert_character_version(current: dict, expected_version: int) -> None:
+    if int(current["version"]) != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Character version conflict",
+                "expected_version": expected_version,
+                "active_version": current["version"],
+            },
+        )
+
+
+def _character_consistency_risk(payload: dict) -> str | None:
+    selected = [
+        item
+        for item in payload.get("reference_images", [])
+        if item.get("selected")
+    ]
+    framings = {item.get("framing") for item in selected}
+    if framings != {"portrait", "half", "full"}:
+        return (
+            "角色尚未确认 portrait、half、full 三类参考图；仅凭文本无法承诺"
+            "跨镜头人物一致性。"
+        )
+    if not payload.get("locked"):
+        return "参考图已选择但角色资产尚未锁定，后续版本替换可能导致人物漂移。"
+    return None
+
+
+@app.post(
+    "/projects/{project_id}/characters/references/generate",
+    response_model=CharacterReferenceResponse,
+)
+async def generate_character_references(
+    project_id: UUID,
+    request: CharacterReferenceGenerateRequest,
+) -> CharacterReferenceResponse:
+    current = _active_character_asset(project_id)
+    _assert_character_version(current, request.expected_version)
+    if current["payload"].get("locked"):
+        raise HTTPException(
+            status_code=409,
+            detail="Unlock the Character Asset before generating new candidates",
+        )
+    updated = deepcopy(current["payload"])
+    if len(updated.get("reference_images", [])) + 3 > 24:
+        raise HTTPException(
+            status_code=409,
+            detail="Character reference candidate limit reached",
+        )
+    generated_references: list[dict] = []
+    uploaded_paths: list[str] = []
+    try:
+        for framing in ("portrait", "half", "full"):
+            reference_id = f"REF-{framing.upper()}-{uuid4().hex[:8].upper()}"
+            generated = await character_image_adapter.generate(updated, framing)
+            suffix = {
+                "image/svg+xml": "svg",
+                "image/png": "png",
+                "image/jpeg": "jpg",
+                "image/webp": "webp",
+            }[generated.content_type]
+            storage_path = await media_storage.put(
+                (
+                    f"projects/{project_id}/characters/{updated['id']}/"
+                    f"{reference_id}.{suffix}"
+                ),
+                BytesIO(generated.content),
+                content_type=generated.content_type,
+            )
+            uploaded_paths.append(storage_path)
+            generated_references.append(
+                {
+                    "id": reference_id,
+                    "framing": framing,
+                    "storage_path": storage_path,
+                    "content_type": generated.content_type,
+                    "provider": generated.provider,
+                    "model": generated.model,
+                    "selected": False,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+    except Exception as error:
+        for storage_path in uploaded_paths:
+            try:
+                await media_storage.delete(storage_path)
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=502,
+            detail=f"Character reference provider failed: {public_error(error, 'provider error')}",
+        ) from error
+    updated["reference_images"] = [
+        *updated.get("reference_images", []),
+        *generated_references,
+    ]
+    updated["provider_bindings"] = {
+        **updated.get("provider_bindings", {}),
+        "reference_provider": generated_references[0]["provider"],
+        "reference_model": generated_references[0]["model"],
+    }
+    updated = CharacterAsset.model_validate(updated).model_dump(mode="json")
+    asset = insert_asset_version(
+        project_id,
+        "character",
+        updated,
+        activate=True,
+        provider=generated_references[0]["provider"],
+        model=generated_references[0]["model"],
+        prompt="Generate portrait, half, and full character reference candidates",
+        input_snapshot=generation_input_snapshot(project_id, "character"),
+    )
+    return CharacterReferenceResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+        consistency_risk=_character_consistency_risk(updated),
+    )
+
+
+@app.patch(
+    "/projects/{project_id}/characters/references",
+    response_model=CharacterReferenceResponse,
+)
+def select_character_references(
+    project_id: UUID,
+    request: CharacterReferenceSelectionRequest,
+) -> CharacterReferenceResponse:
+    current = _active_character_asset(project_id)
+    _assert_character_version(current, request.expected_version)
+    updated = deepcopy(current["payload"])
+    candidates = updated.get("reference_images", [])
+    known_ids = {item["id"] for item in candidates}
+    selected_ids = list(dict.fromkeys(request.selected_reference_ids))
+    unknown = sorted(set(selected_ids) - known_ids)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown character reference ids: {', '.join(unknown)}",
+        )
+    for item in candidates:
+        item["selected"] = item["id"] in selected_ids
+    selected_counts = {
+        framing: sum(
+            1
+            for item in candidates
+            if item.get("selected") and item["framing"] == framing
+        )
+        for framing in ("portrait", "half", "full")
+    }
+    if request.locked and any(count != 1 for count in selected_counts.values()):
+        raise HTTPException(
+            status_code=422,
+            detail="Locking requires one selected portrait, half, and full reference",
+        )
+    updated["locked"] = request.locked
+    updated["provider_bindings"] = {
+        **updated.get("provider_bindings", {}),
+        "selected_reference_ids": ",".join(selected_ids),
+    }
+    updated = CharacterAsset.model_validate(updated).model_dump(mode="json")
+    asset = insert_asset_version(
+        project_id,
+        "character",
+        updated,
+        activate=True,
+        provider="user",
+        model="character-reference-lock",
+        prompt="Select and lock character reference candidates",
+        input_snapshot=generation_input_snapshot(project_id, "character"),
+    )
+    return CharacterReferenceResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+        consistency_risk=_character_consistency_risk(updated),
+    )
+
+
+@app.get(
+    "/projects/{project_id}/character-assets/{asset_id}/references/{reference_id}",
+)
+async def get_character_reference(
+    project_id: UUID,
+    asset_id: int,
+    reference_id: str,
+    download: bool = False,
+) -> Response:
+    asset = next(
+        (
+            item
+            for item in list_asset_versions(project_id, "character")
+            if int(item["id"]) == asset_id
+        ),
+        None,
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Character Asset not found")
+    reference = next(
+        (
+            item
+            for item in asset["payload"].get("reference_images", [])
+            if item.get("id") == reference_id
+        ),
+        None,
+    )
+    if not reference:
+        raise HTTPException(status_code=404, detail="Character reference not found")
+    try:
+        content = await media_storage.read(reference["storage_path"])
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Character reference media unavailable: {public_error(error, 'storage error')}",
+        ) from error
+    extension = {
+        "image/svg+xml": "svg",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+    }[reference["content_type"]]
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type=reference["content_type"],
+        headers={
+            "Content-Disposition": (
+                f'{disposition}; filename="{reference_id}.{extension}"'
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.post("/story/create", response_model=PipelineAsset)
 def create_story(payload: ProjectRef) -> PipelineAsset:
     return create_asset(payload.project_id, "story")
@@ -138,21 +892,588 @@ def create_shots(payload: ProjectRef) -> PipelineAsset:
     return create_asset(payload.project_id, "shots")
 
 
+def _active_shot_asset(project_id: UUID) -> dict:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "shots")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active ShotSet not found")
+    return current
+
+
+def _assert_shot_version(current: dict, expected_version: int) -> None:
+    if int(current["version"]) != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "ShotSet version conflict",
+                "expected_version": expected_version,
+                "active_version": current["version"],
+            },
+        )
+
+
+@app.patch(
+    "/projects/{project_id}/shots",
+    response_model=ShotSetMutationResponse,
+)
+def update_project_shots(
+    project_id: UUID,
+    request: ShotSetUpdateRequest,
+) -> ShotSetMutationResponse:
+    current = _active_shot_asset(project_id)
+    _assert_shot_version(current, request.expected_version)
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    payload = {
+        **current["payload"],
+        "shots": request.shots,
+    }
+    try:
+        edited = canonicalize_shot_set(
+            payload,
+            target_duration=float(project["target_duration"]),
+        )
+        validated = validate_domain_asset(
+            "shots",
+            edited.model_dump(mode="json"),
+            load_context(project_id),
+        )
+    except (ShotEditError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    asset = insert_asset_version(
+        project_id,
+        "shots",
+        validated.model_dump(mode="json"),
+        activate=True,
+        provider="user",
+        model="shot-editor",
+        prompt="Edit, reorder, add, delete, duplicate, or lock Shot Cards",
+        input_snapshot=generation_input_snapshot(project_id, "shots"),
+    )
+    return ShotSetMutationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/shots/{shot_id}/regenerate",
+    response_model=ShotSetMutationResponse,
+)
+def regenerate_project_shot(
+    project_id: UUID,
+    shot_id: str,
+    request: ShotRegenerateRequest,
+) -> ShotSetMutationResponse:
+    current = _active_shot_asset(project_id)
+    _assert_shot_version(current, request.expected_version)
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    current_shot = next(
+        (
+            shot
+            for shot in current["payload"].get("shots", [])
+            if shot["id"] == shot_id
+        ),
+        None,
+    )
+    if not current_shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    context = load_context(project_id)
+    try:
+        context = restrict_context_to_confirmed_segment(context)
+        generated_shot = adapter.regenerate_shot(current_shot, context)
+        regenerated = replace_single_shot(
+            current["payload"],
+            shot_id,
+            generated_shot,
+            target_duration=float(project["target_duration"]),
+        )
+        regenerated = ShotSetAsset.model_validate(
+            validate_domain_asset(
+                "shots",
+                regenerated.model_dump(mode="json"),
+                context,
+            )
+        )
+    except ShotEditError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (AssetGenerationError, ValueError, StopIteration) as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Single-shot regeneration failed: {public_error(error, 'generation error')}",
+        ) from error
+    except ProviderRequestError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Single-shot provider failed: {public_error(error, 'provider error')}",
+        ) from error
+    asset = insert_asset_version(
+        project_id,
+        "shots",
+        regenerated.model_dump(mode="json"),
+        activate=True,
+        provider=adapter.provider_name,
+        model=adapter.model_name,
+        prompt=f"Regenerate only shot {shot_id}",
+        input_snapshot=generation_input_snapshot(project_id, "shots"),
+    )
+    return ShotSetMutationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+def _active_keyframe_asset(project_id: UUID) -> dict:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "keyframes")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active keyframe set not found")
+    return current
+
+
+def _assert_keyframe_version(current: dict, expected_version: int) -> None:
+    if int(current["version"]) != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Keyframe set version conflict: expected {expected_version}, "
+                f"active is {current['version']}"
+            ),
+        )
+
+
+def _keyframe_response(asset: dict) -> KeyframeMutationResponse:
+    context = load_context(asset["project_id"])
+    payload = asset["payload"]
+    return KeyframeMutationResponse(
+        asset=AssetVersion.model_validate(asset),
+        progress=KeyframeProgress.model_validate(keyframe_progress(payload["tasks"])),
+        consistency_warnings=keyframe_consistency_warnings(
+            payload=payload,
+            context=context,
+        ),
+    )
+
+
+def _persist_keyframes(
+    project_id: UUID,
+    *,
+    tasks: list[dict],
+    context: dict,
+    prompt: str,
+) -> dict:
+    shots_version = context["asset_versions"]["shots"]
+    payload = KeyframeSetAsset(
+        shots_asset_id=shots_version["asset_id"],
+        shots_version=shots_version["version"],
+        tasks=tasks,
+    ).model_dump(mode="json")
+    return insert_asset_version(
+        project_id,
+        "keyframes",
+        payload,
+        activate=True,
+        provider=keyframe_image_adapter.provider,
+        model=keyframe_image_adapter.model,
+        prompt=prompt,
+        input_snapshot=generation_input_snapshot(project_id, "keyframes"),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/keyframes/start",
+    response_model=KeyframeMutationResponse,
+)
+async def start_keyframes(
+    project_id: UUID,
+    payload: KeyframeGenerateRequest,
+) -> KeyframeMutationResponse:
+    context = load_context(project_id)
+    for required in ("world", "character", "shots"):
+        if required not in context["assets"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Create {required} before generating keyframes",
+            )
+    shots_version = context["asset_versions"]["shots"]
+    if shots_version["version"] != payload.expected_shots_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"ShotSet version conflict: expected {payload.expected_shots_version}, "
+                f"active is {shots_version['version']}"
+            ),
+        )
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "keyframes")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    confirmed_by_shot = {
+        task["shot_id"]: task
+        for task in (current["payload"]["tasks"] if current else [])
+        if task.get("confirmed")
+    }
+    current_by_shot = {
+        task["shot_id"]: task
+        for task in (current["payload"]["tasks"] if current else [])
+    }
+    tasks: list[dict] = []
+    pending: list[tuple[int, dict, int]] = []
+    for shot in context["assets"]["shots"]["shots"]:
+        if shot["id"] in confirmed_by_shot:
+            tasks.append(confirmed_by_shot[shot["id"]])
+            continue
+        tasks.append({})
+        pending.append(
+            (
+                len(tasks) - 1,
+                shot,
+                int(current_by_shot.get(shot["id"], {}).get("attempt", 0)) + 1,
+            )
+        )
+    generated = await asyncio.gather(
+        *(
+            generate_keyframe_task(
+                project_id=str(project_id),
+                shot=shot,
+                context=context,
+                adapter=keyframe_image_adapter,
+                media_storage=media_storage,
+                attempt=attempt,
+            )
+            for _, shot, attempt in pending
+        )
+    )
+    for (index, _, _), task in zip(pending, generated, strict=True):
+        tasks[index] = task.model_dump(mode="json")
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt="Generate keyframes for every unconfirmed shot",
+    )
+    log_event(
+        "keyframes_batch_completed",
+        project_id=str(project_id),
+        provider=keyframe_image_adapter.provider,
+        succeeded=sum(task["status"] == "succeeded" for task in tasks),
+        failed=sum(task["status"] == "failed" for task in tasks),
+    )
+    return _keyframe_response(asset)
+
+
+@app.post(
+    "/projects/{project_id}/keyframes/{shot_id}/retry",
+    response_model=KeyframeMutationResponse,
+)
+async def retry_keyframe(
+    project_id: UUID,
+    shot_id: str,
+    payload: KeyframeMutationRequest,
+) -> KeyframeMutationResponse:
+    current = _active_keyframe_asset(project_id)
+    _assert_keyframe_version(current, payload.expected_version)
+    existing = next(
+        (task for task in current["payload"]["tasks"] if task["shot_id"] == shot_id),
+        None,
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Keyframe task not found")
+    if existing.get("confirmed"):
+        raise HTTPException(
+            status_code=409,
+            detail="Confirmed keyframes cannot be overwritten",
+        )
+    context = load_context(project_id)
+    shot = next(
+        (
+            item
+            for item in context["assets"]["shots"]["shots"]
+            if item["id"] == shot_id
+        ),
+        None,
+    )
+    if not shot:
+        raise HTTPException(status_code=409, detail="Shot is no longer active")
+    regenerated = await generate_keyframe_task(
+        project_id=str(project_id),
+        shot=shot,
+        context=context,
+        adapter=keyframe_image_adapter,
+        media_storage=media_storage,
+        attempt=int(existing["attempt"]) + 1,
+    )
+    tasks = [
+        regenerated.model_dump(mode="json") if task["shot_id"] == shot_id else task
+        for task in current["payload"]["tasks"]
+    ]
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt=f"Retry only keyframe {shot_id}",
+    )
+    return _keyframe_response(asset)
+
+
+@app.post(
+    "/projects/{project_id}/keyframes/retry-failed",
+    response_model=KeyframeMutationResponse,
+)
+async def retry_failed_keyframes(
+    project_id: UUID,
+    payload: KeyframeMutationRequest,
+) -> KeyframeMutationResponse:
+    current = _active_keyframe_asset(project_id)
+    _assert_keyframe_version(current, payload.expected_version)
+    context = load_context(project_id)
+    shots = {
+        shot["id"]: shot for shot in context["assets"]["shots"]["shots"]
+    }
+    tasks: list[dict] = []
+    pending: list[tuple[int, dict, int]] = []
+    for existing in current["payload"]["tasks"]:
+        if existing["status"] != "failed":
+            tasks.append(existing)
+            continue
+        shot = shots.get(existing["shot_id"])
+        if not shot:
+            tasks.append(existing)
+            continue
+        tasks.append({})
+        pending.append(
+            (
+                len(tasks) - 1,
+                shot,
+                int(existing["attempt"]) + 1,
+            )
+        )
+    regenerated_tasks = await asyncio.gather(
+        *(
+            generate_keyframe_task(
+                project_id=str(project_id),
+                shot=shot,
+                context=context,
+                adapter=keyframe_image_adapter,
+                media_storage=media_storage,
+                attempt=attempt,
+            )
+            for _, shot, attempt in pending
+        )
+    )
+    for (index, _, _), task in zip(pending, regenerated_tasks, strict=True):
+        tasks[index] = task.model_dump(mode="json")
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt="Retry all failed keyframes",
+    )
+    return _keyframe_response(asset)
+
+
+@app.patch(
+    "/projects/{project_id}/keyframes/{shot_id}",
+    response_model=KeyframeMutationResponse,
+)
+def confirm_keyframe(
+    project_id: UUID,
+    shot_id: str,
+    payload: KeyframeConfirmationRequest,
+) -> KeyframeMutationResponse:
+    current = _active_keyframe_asset(project_id)
+    _assert_keyframe_version(current, payload.expected_version)
+    found = False
+    tasks = deepcopy(current["payload"]["tasks"])
+    for task in tasks:
+        if task["shot_id"] != shot_id:
+            continue
+        found = True
+        if payload.confirmed and task["status"] != "succeeded":
+            raise HTTPException(
+                status_code=409,
+                detail="Only succeeded keyframes can be confirmed",
+            )
+        task["confirmed"] = payload.confirmed
+    if not found:
+        raise HTTPException(status_code=404, detail="Keyframe task not found")
+    context = load_context(project_id)
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt=f"Set {shot_id} confirmed={payload.confirmed}",
+    )
+    return _keyframe_response(asset)
+
+
+def _keyframe_task_with_result(project_id: UUID, shot_id: str) -> dict:
+    current = _active_keyframe_asset(project_id)
+    task = next(
+        (item for item in current["payload"]["tasks"] if item["shot_id"] == shot_id),
+        None,
+    )
+    if not task or not task.get("result"):
+        raise HTTPException(status_code=404, detail="Keyframe result not found")
+    return task
+
+
+@app.get("/projects/{project_id}/keyframes/{shot_id}/image")
+async def get_keyframe_image(
+    project_id: UUID,
+    shot_id: str,
+    download: bool = False,
+) -> Response:
+    task = _keyframe_task_with_result(project_id, shot_id)
+    result = task["result"]
+    try:
+        content = await media_storage.read(result["storage_path"])
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Keyframe file not found") from error
+    extension = {
+        "image/svg+xml": "svg",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+    }[result["content_type"]]
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type=result["content_type"],
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{shot_id}.{extension}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _active_keyframe_manifest(project_id: UUID) -> tuple[dict, dict]:
+    asset = _active_keyframe_asset(project_id)
+    context = load_context(project_id)
+    return asset, manifest_document(asset, context)
+
+
+@app.get("/projects/{project_id}/keyframes/manifest.json")
+def download_keyframe_manifest_json(project_id: UUID) -> Response:
+    _, manifest = _active_keyframe_manifest(project_id)
+    return Response(
+        content=json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="keyframes-manifest.json"'},
+    )
+
+
+@app.get("/projects/{project_id}/keyframes/manifest.pdf")
+def download_keyframe_manifest_pdf(project_id: UUID) -> Response:
+    _, manifest = _active_keyframe_manifest(project_id)
+    return Response(
+        content=render_manifest_pdf(manifest),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="keyframes-manifest.pdf"'},
+    )
+
+
+@app.get("/projects/{project_id}/keyframes/export.zip")
+async def download_keyframe_export(project_id: UUID) -> Response:
+    asset = _active_keyframe_asset(project_id)
+    context = load_context(project_id)
+    try:
+        content = await build_keyframe_zip(
+            asset=asset,
+            context=context,
+            media_storage=media_storage,
+        )
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="keyframes-export.zip"'},
+    )
+
+
+@app.get("/projects/{project_id}/exports/jianying-assistant.zip")
+async def download_jianying_assistant_package(project_id: UUID) -> Response:
+    asset = _active_keyframe_asset(project_id)
+    context = load_context(project_id)
+    audio = get_latest_audio(project_id)
+    if not audio:
+        raise HTTPException(status_code=409, detail="Upload audio before exporting")
+    missing = [
+        kind
+        for kind in ("segment", "shots", "keyframes")
+        if kind not in context["assets"]
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Create {', '.join(missing)} before exporting",
+        )
+    if any(task["status"] != "succeeded" for task in asset["payload"]["tasks"]):
+        raise HTTPException(
+            status_code=409,
+            detail="All keyframes must succeed before exporting to Jianying Assistant",
+        )
+    try:
+        content = await build_jianying_package(
+            audio=audio,
+            keyframe_asset=asset,
+            context=context,
+            media_storage=media_storage,
+        )
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    log_event(
+        "jianying_handoff_exported",
+        project_id=str(project_id),
+        provider="jianying-assistant",
+        keyframe_count=len(asset["payload"]["tasks"]),
+    )
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="jianying-assistant-handoff.zip"'
+            )
+        },
+    )
+
+
 @app.post("/render/start", status_code=202)
 def start_render(payload: RenderRequest) -> dict:
     context = load_context(payload.project_id)
     if "shots" not in context["assets"]:
         raise HTTPException(status_code=409, detail="Create shots before rendering")
-    job_id = uuid4()
     job = {
         "aspect_ratio": payload.aspect_ratio,
         "shot_count": len(context["assets"]["shots"]["shots"]),
         "mode": "demo" if settings.adapter_mode == "demo" else "provider",
     }
-    with database.connection() as connection:
-        connection.execute(
-            "INSERT INTO render_jobs(id, project_id, adapter, status, payload) VALUES (%s, %s, %s, %s, %s::jsonb)",
-            (job_id, payload.project_id, payload.video_adapter, "queued", json.dumps(job)),
-        )
-        connection.commit()
+    job_id = create_render_job(payload.project_id, payload.video_adapter, job)
+    log_event(
+        "render_job_created",
+        project_id=str(payload.project_id),
+        job_id=str(job_id),
+        provider=payload.video_adapter,
+    )
     return {"job_id": job_id, "status": "queued", **job}

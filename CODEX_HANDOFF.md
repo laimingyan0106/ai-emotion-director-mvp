@@ -1,5 +1,14 @@
 # Codex 接手说明
 
+## v1.1 T013 发布收口（2026-07-30）
+
+- 新增真实 OpenAI 图片 Provider：Provider 模式使用 `gpt-image-2`，关键帧并发生成，`/health` 暴露实际 provider/model/fallback。
+- 新增 JSON 结构化请求日志，包含 request/project/job/provider 追踪字段；Provider 错误和日志统一脱敏。
+- 新增 `/projects/{id}/exports/jianying-assistant.zip`，内含原音频、裁剪区间、镜头时间线、关键帧与剪映小助手提示词。
+- 新增自动发布 E2E，从 WAV 上传和真实分析一直覆盖到剪映交接包；CI 增加 secret scan、Bandit 与生产依赖审计。
+- 数据库无新增表或列，无遗漏 SQL 迁移。全新环境和安全密钥部署步骤见 `docs/DEPLOYMENT.md`。
+- 完成口径：Demo 线上 E2E、真实 Provider 冒烟、前后端全套测试、安全扫描、公开部署全部通过后，才能声明 v1.1 完成。
+
 ## 项目目标
 
 AI 情绪导演把一首歌曲转换成可执行的 30 秒 MV 导演方案，包括音乐情绪分析、World Bible、Character Asset、三幕故事、Shot Card、视频 Prompt 与渲染任务。
@@ -87,3 +96,343 @@ docker compose up --build
 - GitHub Actions 验收：前端与后端两个 Job 均已实际运行通过；工作流 Action 已使用当前 v7 主版本，避免旧 Node.js Action 运行时弃用警告。
 - 已知风险：当前测试仍仅覆盖 v1.0 的 SSR 与纯领域逻辑，尚未包含数据库和浏览器 E2E。
 - 下一任务：`V11-T002`，部署可访问的 FastAPI 服务并通过 `NEXT_PUBLIC_API_BASE_URL` 打通前端；不得删除 Demo Adapter。
+
+### V11-T002：部署可访问的 FastAPI 服务并打通前端
+
+- 状态：完成
+- 公开前端：`https://ai-emotion-director-web.vercel.app`
+- Sites 版本（工作区登录访问）：`https://ai-emotion-director-0729.nonkxybee.chatgpt.site`
+- 公开 FastAPI：`https://ai-emotion-director-api.vercel.app`
+- 前端配置：`NEXT_PUBLIC_API_BASE_URL=https://ai-emotion-director-api.vercel.app`
+- 新增类型化 API 客户端、健康检查、Real API / Demo / 离线状态提示。
+- 真实 API 模式支持创建项目、上传音频，并把 `project_id` 写入网址；刷新后通过 `GET /project/{project_id}` 回读项目与音频摘要。
+- 未配置 API 地址时保留完整 Demo Adapter，不需要模型密钥。
+- API 变更：
+  - 新增 `GET /project/{project_id}`
+  - `GET /health` 增加 `storage` 与 `durable_storage`
+- 验证结果：
+  - `npm test`：PASS（2/2）
+  - `npm run lint`：PASS
+  - `python -m unittest discover -s backend/tests -v`：PASS（3/3）
+  - GitHub Actions：前端、后端 Job 均 PASS
+  - 生产 API：创建项目、上传音频、GET 回读 PASS
+  - 生产浏览器：Real API 健康状态、选择音频、创建项目、上传音频、网址写入 `project_id`、刷新回读 `API SAVED` 均 PASS
+  - 断线提示：实际 CORS 断连时页面显示 `API 离线` 与明确错误信息；补齐 Vercel 域名 CORS 后恢复为 `Real API`
+- 当前托管存储：临时 SQLite + `/tmp` 媒体目录。它满足 T002 的联网与刷新回读验收，但不保证跨实例持久化。
+- 当前公开前端是由 vinext 生产构建预渲染得到的静态 Vercel 部署；Sites 工作区禁止公开发布，因此 Sites 版本继续保留为登录访问。
+- 已知风险：Vercel 实例重启或请求落到其他实例时，临时数据可能不可见；严禁把它视为正式用户数据存储。
+- 下一任务：`V11-T003`，接入正式数据库与对象存储，完成项目列表、详情、编辑、删除、自动保存和跨设备持久化。
+
+### V11-T003：项目列表、详情与持久化恢复
+
+- 状态：完成
+- 生产数据库：Vercel Marketplace Neon PostgreSQL（新加坡区域，免费方案）
+- 生产媒体存储：私有 Vercel Blob（香港区域）
+- 数据库迁移：应用启动时以幂等 DDL 创建 `projects`、`audio_assets`、`generated_assets`、`render_jobs`；外键使用 `ON DELETE CASCADE`。
+- API 变更：
+  - 新增 `GET /projects`
+  - 新增 `GET /projects/{project_id}`
+  - 新增 `PATCH /projects/{project_id}`
+  - 新增 `DELETE /projects/{project_id}`
+  - 保留 `GET /project/{project_id}` 兼容 T002 链路
+  - `GET /health` 新增 `media_storage`
+- 前端变更：
+  - 新增云端项目列表、最近更新时间和音频摘要
+  - 支持按 `project_id` 打开项目
+  - 项目名称 700ms 防抖自动保存
+  - 删除前二次确认，删除后清理当前 URL 与页面状态
+- 验证结果：
+  - `npm test`：PASS（2/2）
+  - `npm run lint`：PASS
+  - `python -m unittest discover -s backend/tests -v`：PASS（5/5）
+  - 真实 Neon + Blob：创建两个项目、上传音频、改名、列表、详情回读、删除 PASS
+  - 生产 API：`storage=postgres`、`durable_storage=true`、`media_storage=vercel_blob`
+  - 生产 API：创建两个项目、PATCH 改名、GET 列表、独立 GET 回读、DELETE 清理 PASS
+- 安全与清理：
+  - 本地媒体路径执行存储根目录边界校验，禁止目录穿越
+  - 删除项目时级联清理数据库关联记录和媒体对象
+  - Blob 与数据库凭据仅由 Vercel 环境注入，未提交到仓库
+- 已知限制：生产音频上传仍受 Vercel Function 请求体限制；大文件直传将在后续音频管线任务中处理。
+- 下一任务：`V11-T004`，实现资产版本管理、唯一激活版本和回滚依赖警告。
+
+### V11-T004：资产版本管理与激活/回滚
+
+- 状态：完成
+- 数据库迁移：
+  - `generated_assets` 新增 `status`、`is_active`、`parent_asset_id`、`provider`、`model`、`prompt`、`input_snapshot`、`validation_errors`、`updated_at`
+  - 新增 `(project_id, kind, version)` 唯一索引
+  - 新增 `(project_id, kind) WHERE is_active` 部分唯一索引，数据库层保证同类资产至多一个激活版本
+  - PostgreSQL 使用事务级 advisory lock，SQLite 使用 `BEGIN IMMEDIATE`，并发生成时版本号仍连续且唯一
+- 版本行为：
+  - 成功生成先写入 draft，再在同一事务内归档旧版本并激活新版本
+  - 失败生成保留为 failed 版本，不替换当前激活版本
+  - 新版本通过 `parent_asset_id` 保留同类版本谱系，通过 `input_snapshot` 固化上游激活资产 ID 与版本
+  - 项目上下文只读取 `is_active=true` 的资产，禁止用 `created_at` 覆盖同类资产
+- API 变更：
+  - 新增 `GET /projects/{project_id}/assets`
+  - 新增 `POST /projects/{project_id}/assets/{kind}/activate`
+  - World、Character、Story、Shots 和 audio_analysis 响应增加 `asset_id`、`version`、`status`、`is_active`
+  - 回滚后返回下游依赖不匹配警告；failed 版本禁止激活
+- 验证结果：
+  - 后端 7/7 测试 PASS
+  - 6 线程并发创建同类资产，版本号 1–6 连续唯一且仅一个激活版本
+  - 回滚后 Character 上游 World 依赖警告 PASS
+  - failed 版本不替换激活版本且激活请求返回 409
+  - `npm test`、`npm run lint`、Python compileall PASS
+- 下一任务：`V11-T005`，实现 World、Character、Story、Shots 严格 Schema 校验、结构化错误与自动重试。
+
+### V11-T005：结构化输出 Schema、校验与重试
+
+- 状态：完成
+- 新增严格领域模型：`WorldAsset`、`CharacterAsset`、`StoryAsset`、`ShotSetAsset`
+  - 全部模型禁止额外字段并限制字符串、列表、ID、色值、时长、FPS 与画幅
+  - Shot ID 必须唯一，时间线必须连续，镜头时长之和必须等于 ShotSet 声明时长
+  - ShotSet 总时长必须等于项目 `target_duration`
+  - 镜头的 `character_ids` 必须引用当前激活 Character 中真实存在的角色
+- 新增结构化生成服务：
+  - 支持 JSON 字符串或对象输出
+  - 首次解析或 Schema 校验失败后调用 Adapter `repair` 自动修复重试
+  - `GENERATION_RETRY_ATTEMPTS` 可配置，默认重试 1 次，最大 3 次
+  - 每次错误记录 attempt、location、type、message，不静默吞错
+  - 重试成功时错误历史写入新激活版本；最终失败时保留 last payload 为 failed 版本
+  - 最终失败返回 422 和结构化 `validation_errors`，旧激活版本保持不变
+- Demo Shots 增加显式 `character_ids=["CHAR-001"]`，进入与真实 LLM 相同的引用校验链路。
+- 验证结果：
+  - 后端 13/13 测试 PASS
+  - 畸形 JSON 自动修复一次后成功 PASS
+  - retry=0 时立即失败且错误可见 PASS
+  - 总时长不等于目标时长被拒绝 PASS
+  - 不存在的角色引用被拒绝 PASS
+  - extra 字段被拒绝 PASS
+  - API 最终失败写入 failed 版本且不污染旧激活版本 PASS
+- 下一任务：`V11-T006`，实现 FFmpeg/librosa 真实音频特征分析并保留 Demo fallback。
+
+### V11-T006：真实音频特征分析管线
+
+- 状态：完成
+- 音频分析：
+  - 使用 librosa 提取 duration、BPM、beats、onsets、RMS、spectral centroid、chroma
+  - 生成 100 点归一化 `energy_curve`，识别静音段与最多 8 个能量峰值候选
+  - 输出 `source_sha256`、`analysis_version=librosa-v1` 与处理耗时，固定音频结果可重复
+  - MP3/M4A 等压缩格式优先使用系统 FFmpeg；缺失时使用 `imageio-ffmpeg` 的托管二进制解码
+  - 不把能量与频谱信号描述为心理学意义的情绪判断，`primary_emotion` 明确写为未进行该类识别
+- 执行与降级：
+  - Blob 私有音频通过鉴权读取后写入请求级临时目录分析
+  - DSP 在工作线程执行，`AUDIO_ANALYSIS_TIMEOUT_SECONDS` 默认 45 秒
+  - 最多分析 `AUDIO_ANALYSIS_MAX_SECONDS`（默认 600 秒），超长音频标记 `truncated`
+  - 缺少解码器、读取失败、解析失败或超时均返回 `degraded=true` 和 `degraded_reason`
+  - 分析结果同时缓存到 `audio_assets.analysis` 并写入版本化 `audio_analysis`；重复请求返回同一激活版本
+- 验证结果：
+  - 后端 16/16 测试 PASS
+  - 220Hz 稳态与 880Hz 脉冲固定夹具的哈希、频谱质心、能量曲线明显不同
+  - 同一夹具重复分析除处理耗时外结果逐字段一致
+  - 无 FFmpeg 的压缩音频降级原因可见
+  - API 重复分析命中缓存且 asset_id/version 不变
+  - 热态完整后端测试约 4 秒；首次 librosa/Numba 初始化与两首夹具分析小于 30 秒
+- 下一任务：`V11-T007`，实现 30 秒片段推荐、用户确认与后续上下文锁定。
+
+### V11-T007：30 秒片段推荐与确认
+
+- 状态：完成
+- 推荐策略：
+  - 高潮候选：目标窗口平均能量最高
+  - 叙事转折候选：首尾变化与窗口动态最大
+  - 平稳候选：窗口能量方差最低
+  - 每个候选返回 start、end、duration、score 与可解释 reason
+- 确认与版本：
+  - 新增 `GET /projects/{project_id}/segments/recommendations`
+  - 新增 `POST /projects/{project_id}/segments/confirm`
+  - 服务端强制 `end-start == target_duration`，并校验 0 到音频总长边界
+  - 用户确认结果保存为版本化 `segment` 资产，切换片段不覆盖旧版本
+  - World/Character/Story/Shots 在没有确认片段时返回 409
+  - 下游生成的 `input_snapshot` 自动记录 segment asset_id/version
+  - 切换片段后资产 API 与确认响应返回需要重新生成的下游依赖警告
+- 上下文：
+  - 后续生成只收到确认区间内的 energy curve、beats、onsets 和 peaks
+  - 片段内时间统一换算为相对 0–30 秒，同时保留 source_duration 与 source_time
+  - 不再把整首歌固定曲线直接传给导演生成
+- 前端：
+  - 音频分析完成后展示真实能量曲线和选区
+  - 展示三类推荐卡，支持分别拖动“片段起点”和“片段终点”
+  - 两个手柄保持固定 30 秒，当前起止值实时可见
+  - 用户必须点击“确认这个 30 秒片段”，服务端校验成功后才进入导演页面
+- 验证结果：
+  - 后端 18/18 测试 PASS
+  - 推荐三分类、任意合法 30 秒区间、短音频、越界与错误时长测试 PASS
+  - 生成资产记录 segment 版本 PASS
+  - 切换片段后 World 依赖失效警告 PASS
+  - 生成上下文只保留确认片段曲线 PASS
+  - Next/Vinext 构建、TypeScript 与 ESLint PASS
+- 下一任务：`V11-T008`，实现真实 Director LLM Adapter、结构化输出与 Demo 自动降级。
+
+### V11-T008：真实 Director LLM Adapter
+
+- 状态：完成
+- Provider 架构：
+  - `DirectorAdapter` 保留抽象边界，业务层不绑定单一模型
+  - 新增 `ProviderDirectorAdapter` 与独立 `OpenAIResponsesClient`
+  - 使用 OpenAI Responses API 的 JSON Schema structured output
+  - 默认 `LLM_MODEL=gpt-5.6-terra`，可通过环境变量替换
+  - World/Character/Story/ShotSet Schema 由 V11-T005 Pydantic 模型直接生成
+- 配置与降级：
+  - `ADAPTER_MODE=demo|provider`
+  - 支持 `LLM_API_KEY` 或 `OPENAI_API_KEY`，密钥只存在运行环境，不写日志、prompt 或数据库
+  - `ADAPTER_MODE=provider` 但缺少密钥时，完整回落 `DemoDirectorAdapter`
+  - `/health` 分别返回 configured mode、actual adapter、model 与 fallback reason，避免把 Demo 伪装成真实 Provider
+- 稳定性：
+  - Provider 超时默认 60 秒
+  - 429 与 5xx 按 `LLM_HTTP_RETRIES` 有界指数退避，默认 2 次
+  - 4xx、网络错误、无 output text、畸形 JSON 均返回明确结构化错误
+  - Provider 失败写入 failed 资产版本，保存 provider/model/prompt/input_snapshot/error；不替换旧激活版本
+  - Provider 返回仍必须经过 V11-T005 领域 Schema 与 repair 重试
+- 验证结果：
+  - 后端 22/22 测试 PASS
+  - Mock Responses structured output 与 Schema 请求 PASS
+  - Mock 429 后有界重试 PASS
+  - 缺少密钥自动回落完整 Demo PASS
+  - Provider 最终失败返回 502、记录 failed 版本且旧 active 不变 PASS
+  - 未发现可用真实 API 密钥，因此没有执行付费真实 Provider smoke test；此边界已明确保留
+- 下一任务：`V11-T009`，扩展 World Bible v1.1 的视觉、声音、地点与负面约束体系。
+
+### V11-T009：World Bible v1.1
+
+- 状态：完成
+- 结构化 Schema：
+  - `immutable_rules` 独立保存世界规则、地理、建筑、科技、材质、摄影系统与视觉禁区
+  - `mutable_state` 独立保存天气、时段、季节、公共情绪与当前地点
+  - 禁止额外字段并限制列表长度，避免 World Bible 退化成长篇无结构散文
+- 编辑、锁定与版本：
+  - 新增 `PATCH /projects/{project_id}/world`，使用 `expected_version` 做乐观并发校验
+  - World Studio 支持世界名称、视觉风格、当前天气编辑，保存时生成新的激活版本
+  - 字段可锁定；重新生成 World 时从当前激活版本恢复锁定值
+  - 修改 World 后返回 Character/Story/Shots 的依赖失效警告
+- Prompt 上下文：
+  - 生成任务按依赖图保存最小 `input_snapshot`
+  - Shots 只注入 World 中与镜头相关的地理、建筑、材质、摄影、灯光、视觉禁区及当前拍摄状态
+  - 不向 Shots Prompt 注入文化、情绪母题等无关长文本
+  - Shots 的 `input_snapshot.world` 明确记录引用的 asset_id/version
+- 前端：
+  - 无 World 时可从已确认片段首次生成
+  - 显示当前 World 版本号、动态世界信息与真实色板
+  - 支持编辑、锁定、保存为新版本和重新生成
+- 验证结果：
+  - 后端 26/26 测试 PASS
+  - World Schema、锁定字段再生成、Shots Prompt 最小上下文测试 PASS
+  - API 编辑、版本冲突、再生成保锁与镜头 World 版本引用测试 PASS
+  - Next/Vinext 构建、TypeScript 与 ESLint PASS
+- 下一任务：`V11-T010`。
+
+### V11-T010：Character Asset、参考图与锁定
+
+- 状态：完成
+- Character Schema：
+  - 新增 `negative_constraints`、`provider_bindings`、`reference_images` 与 `locked`
+  - 参考图记录 framing、存储地址、媒体类型、provider、model、选择状态与生成时间
+  - 不承诺仅凭文本保持人物一致，缺少完整参考图时返回并显示明确风险
+- 参考图：
+  - 新增可替换 `CharacterImageAdapter`
+  - Demo/无密钥模式使用确定性 SVG Adapter，测试使用独立 Mock Adapter
+  - 每次生成 portrait、half、full 三类候选并写入私有媒体存储
+  - 新增鉴权代理式查看/下载 API，不向前端暴露 Blob 访问令牌
+  - 删除项目时同时去重清理所有历史角色版本引用的参考图文件
+- 选择、锁定与版本：
+  - 用户可选择候选；锁定要求每类构图恰好选择一张
+  - 选择、锁定和解锁均创建新的 Character 激活版本，不原地修改旧版本
+  - 锁定角色禁止直接重新生成，必须显式解锁
+  - 角色版本变化后，已有 Shots 返回下游依赖失效警告
+- 镜头引用：
+  - 每个 Shot 保存 `character_ids` 和对应的 `character_refs`
+  - `character_refs` 强制包含 `character_id + asset_id + version`
+  - Schema 校验所有镜头必须引用当前激活 Character 的准确版本
+- 前端：
+  - Character Studio 显示真实角色版本、负面约束、Provider 与锁定状态
+  - 支持生成三类参考图、查看、下载、选择、确认锁定、解锁和角色再生成
+  - 没有完整参考图或尚未锁定时显示一致性风险，不作虚假保证
+- 验证结果：
+  - 后端 27/27 测试 PASS
+  - Adapter Mock 三类生成、图片查看/下载、锁定/解锁测试 PASS
+  - 镜头角色 ID/asset/version 引用完整性测试 PASS
+  - 角色版本替换后的 Shots 依赖警告测试 PASS
+  - 参考图随项目删除清理测试 PASS
+  - 前端 4/4、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 下一任务：`V11-T011`，实现 Shot Card 编辑、拖拽重排和单镜头局部再生成。
+
+### V11-T011：Shot Card 编辑与局部再生成
+
+- 状态：完成
+- Shot Schema 与服务端校验：
+  - Shot 新增 `start_ms` 与 `locked`
+  - 服务端忽略前端传入的起点顺序，按当前数组顺序重新计算 `start`/`start_ms`
+  - 所有镜头时长之和必须严格等于项目目标时长，否则返回 422
+  - 字段编辑、排序、增删、复制和锁定均插入新的 ShotSet 版本，不原地覆盖旧版本
+  - 每次保存继续校验 Character asset_id/version 引用完整性
+- 单镜头再生成：
+  - 新增 `DirectorAdapter.regenerate_shot` 独立边界
+  - 新增 `POST /projects/{project_id}/shots/{shot_id}/regenerate`
+  - 只替换目标镜头的景别、摄影机、动作、情绪与 Prompt
+  - 强制保留镜头 ID、起点、时长、角色引用与锁定状态
+  - 锁定镜头禁止局部再生成，必须显式解锁
+- 整组再生成与锁定：
+  - `/shots/create` 整组再生成时按 shot ID 恢复锁定镜头的创意字段
+  - 角色版本已变化时，锁定镜头的角色引用会安全更新到新激活版本
+  - 未锁定镜头由新结果替换
+- 前端：
+  - Shot Card 可编辑景别、摄影机、人物动作、情绪、时长与 Video Prompt
+  - 时间线支持 HTML5 拖拽重排
+  - 新增和复制会拆分当前镜头时长；删除会把时长归并到相邻镜头，保持总长
+  - 显示实时总时长、自动毫秒起点和锁定状态
+  - 支持保存新版本、单镜头局部再生成与整组再生成
+  - 存在未保存编辑时禁止局部/整组再生成，避免覆盖前端草稿
+- 验证结果：
+  - 后端 31/31 测试 PASS
+  - Shot reducer 重排、编辑、插入、删除及不可变性单元测试 PASS
+  - API 增删复制、版本化保存、start_ms 重算与总时长拒绝测试 PASS
+  - Mock 单镜头 Adapter 验证只调用一次且仅目标镜头变化 PASS
+  - 锁定镜头局部再生成拒绝、整组再生成保留测试 PASS
+  - 前端测试、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 生产验收：
+  - 公开 Vercel 完成 ShotSet v1 → v2 → v3
+  - v2 编辑/复制/删除后服务端重算为连续 30,000ms
+  - v3 单镜头再生成仅 S03 变化，其他 9 个镜头保持不变
+  - 临时验收项目与音频已清理
+
+### V11-T012：关键帧生成队列
+
+- 状态：完成
+- KeyframeSet 资产与任务追溯：
+  - 每个镜头任务保存 `provider_task_id`、状态、Provider、模型、Prompt、尝试次数、脱敏错误与结果
+  - 结果保存私有存储路径、内容类型、尺寸和 SHA-256
+  - 每个任务记录精确的 World、Character、ShotSet asset_id/version 与镜头内容校验和
+  - KeyframeSet 所有修改继续创建新版本，不原地覆盖
+- 生成与重试：
+  - `POST /projects/{project_id}/keyframes/start` 生成全部未确认镜头
+  - `POST /projects/{project_id}/keyframes/{shot_id}/retry` 只重试一个镜头
+  - `POST /projects/{project_id}/keyframes/retry-failed` 重试全部失败任务
+  - Demo/Mock Adapter 生成确定性 16:9 SVG；失败持久化到任务，不让整组请求丢失
+  - 已确认关键帧在整组重新生成中原样保留，单镜头重试返回 409
+- 确认、预览与导出：
+  - `PATCH /projects/{project_id}/keyframes/{shot_id}` 确认或取消确认
+  - 私有图片通过项目/镜头代理接口预览和下载
+  - JSON 清单包含完整任务、输入版本、校验和、错误与一致性警告
+  - PDF 清单可独立下载
+  - ZIP 包含 `manifest.json`、`manifest.pdf` 与全部成功关键帧，并在打包前复核 SHA-256
+- 前端：
+  - “渲染队列”已改为 T012 关键帧队列，本阶段明确不生成视频
+  - 展示实时完成率、失败数、确认数、一致性提醒和 provider task id
+  - 支持单镜头重试、全部失败重试、确认锁、预览、单张下载和 ZIP/PDF/JSON 导出
+  - 视频与剪映小助手交付明确留到 T013
+- 验证结果：
+  - 后端 32/32 测试 PASS
+  - Mock Adapter 部分失败、单镜头重试、确认后禁止覆盖测试 PASS
+  - 10 张图片、PDF/JSON 清单与 ZIP 完整性测试 PASS
+  - 前端 8/8、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 生产验收：
+  - 新建 40 秒合成音频，真实 librosa 分析为非降级结果
+  - World → 三类角色参考图并锁定 → Story → ShotSet v2 → 10 张关键帧主路径通过
+  - 生产 E2E 捕获并修复 Vercel Blob 禁止同名覆盖的问题；对象名现在包含 attempt 与随机版本段
+  - S01 确认后整组再生成保持同一 provider task id，确认镜头单独重试返回 409
+  - 失败整组重试后为 10/10 succeeded、0 failed、1 confirmed
+  - 生产 ZIP 共 12 项（10 张关键帧 + PDF/JSON），ZIP CRC、10 个 SHA-256、PDF 头尾均通过
+  - 生产 UI 恢复 KeyframeSet v4，显示 100%、10/10、provider task id、确认锁和三类下载入口
+  - 临时项目、音频、关键帧与本地验收下载均已清理
+- 下一任务：`V11-T013`，完成全链路 E2E、结构化日志、脱敏、安全扫描、Provider 验收、部署文档与剪映小助手成片交付。

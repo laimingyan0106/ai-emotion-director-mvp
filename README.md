@@ -25,6 +25,22 @@ docker compose up --build
 
 ## 手册 API
 
+- `GET /health`
+- `GET /project/{project_id}`
+- `GET /projects`
+- `GET /projects/{project_id}`
+- `PATCH /projects/{project_id}`
+- `DELETE /projects/{project_id}`
+- `GET /projects/{project_id}/assets`
+- `POST /projects/{project_id}/assets/{kind}/activate`
+- `GET /projects/{project_id}/segments/recommendations`
+- `POST /projects/{project_id}/segments/confirm`
+- `PATCH /projects/{project_id}/world`
+- `POST /projects/{project_id}/characters/references/generate`
+- `PATCH /projects/{project_id}/characters/references`
+- `GET /projects/{project_id}/character-assets/{asset_id}/references/{reference_id}`
+- `PATCH /projects/{project_id}/shots`
+- `POST /projects/{project_id}/shots/{shot_id}/regenerate`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -32,7 +48,29 @@ docker compose up --build
 - `POST /character/create`
 - `POST /story/create`
 - `POST /shots/create`
+- `GET /projects/{project_id}/exports/jianying-assistant.zip`
 - `POST /render/start`
+
+## v1.1 托管连接
+
+- 公开前端：`https://ai-emotion-director-web.vercel.app`
+- Sites 版本（工作区登录访问）：`https://ai-emotion-director-0729.nonkxybee.chatgpt.site`
+- 公开 FastAPI：`https://ai-emotion-director-api.vercel.app`
+- 前端通过 `NEXT_PUBLIC_API_BASE_URL` 选择真实 API；未配置时自动进入完整 Demo 模式。
+- 当前托管 API 使用 Neon PostgreSQL 与私有 Vercel Blob；项目、音频元数据和关联资产可跨请求、跨设备恢复。
+- 生成资产按项目与类型保留完整版本历史；成功版本原子激活，失败版本仅留档，回滚会返回下游依赖警告。
+- World、Character、Story、ShotSet 使用严格 Pydantic 领域模型；畸形输出会按 `GENERATION_RETRY_ATTEMPTS` 自动修复重试，最终失败不会替换激活版本。
+- 音频分析使用 librosa 与 FFmpeg 提取节拍、起音、RMS、频谱质心、chroma、能量曲线、静音段和峰值候选；失败会明确标记 `degraded`，不会把这些信号宣称为心理学情绪识别。
+- 音频分析后提供高潮、叙事转折、平稳三类 30 秒候选；用户可拖动起止点并显式确认，未确认片段时 World/Character/Story/Shots API 返回 409。
+- `ADAPTER_MODE=provider` 且配置 `LLM_API_KEY`/`OPENAI_API_KEY` 时使用 OpenAI Responses API；模型默认 `gpt-5.6-terra` 并可由 `LLM_MODEL` 覆盖。缺少密钥或 Provider 不支持时自动回落完整 Demo，并在 `/health` 的实际 adapter 与 fallback reason 中明确显示。
+- World Bible v1.1 将稳定规则与可变状态分开保存；World Studio 支持结构化字段编辑、字段锁定和重新生成，锁定值不会在再生成时漂移，镜头资产会记录明确的 World asset/version 输入快照。
+- Character Asset v1.1 保存负面约束、Provider 绑定和 portrait/half/full 三类参考图；用户确认并锁定后，镜头同时记录 character_id、asset_id 和 version。未完成三类参考图确认时，界面明确提示仅凭文本无法保证人物一致。
+- ShotSet v1.1 支持字段编辑、拖拽重排、新增、删除、复制、镜头锁定和单镜头局部再生成；所有写入创建新版本，服务端重算 `start_ms` 并严格校验总时长，锁定镜头不会被整组重新生成覆盖。
+- KeyframeSet v1.1 为每个镜头组合 World/Character/Shot Prompt，持久化 provider task id、状态、错误、重试次数、结果校验和与输入资产版本；支持单镜头/整组失败重试、用户确认锁、私有图片代理，以及包含 10 张关键帧和 PDF/JSON 清单的 ZIP 导出。
+- Provider 模式下关键帧使用 `IMAGE_API_KEY` 或 `OPENAI_API_KEY` 调用 `gpt-image-2`，并发生成并记录 request id、模型、尝试次数和脱敏错误。全部成功后可导出包含音频、时间线、关键帧和提示词的剪映小助手成片交接包。
+- 全新环境、Vercel 密钥、数据库迁移和发布验收见 `docs/DEPLOYMENT.md`。
+- 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
+- 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 
 开发设计与验收说明见 `docs/plans/2026-07-29-ai-emotion-director-design.md`。
 
