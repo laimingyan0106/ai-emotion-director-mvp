@@ -417,4 +417,13 @@ docker compose up --build
   - Mock Adapter 部分失败、单镜头重试、确认后禁止覆盖测试 PASS
   - 10 张图片、PDF/JSON 清单与 ZIP 完整性测试 PASS
   - 前端 8/8、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 生产验收：
+  - 新建 40 秒合成音频，真实 librosa 分析为非降级结果
+  - World → 三类角色参考图并锁定 → Story → ShotSet v2 → 10 张关键帧主路径通过
+  - 生产 E2E 捕获并修复 Vercel Blob 禁止同名覆盖的问题；对象名现在包含 attempt 与随机版本段
+  - S01 确认后整组再生成保持同一 provider task id，确认镜头单独重试返回 409
+  - 失败整组重试后为 10/10 succeeded、0 failed、1 confirmed
+  - 生产 ZIP 共 12 项（10 张关键帧 + PDF/JSON），ZIP CRC、10 个 SHA-256、PDF 头尾均通过
+  - 生产 UI 恢复 KeyframeSet v4，显示 100%、10/10、provider task id、确认锁和三类下载入口
+  - 临时项目、音频、关键帧与本地验收下载均已清理
 - 下一任务：`V11-T013`，完成全链路 E2E、结构化日志、脱敏、安全扫描、Provider 验收、部署文档与剪映小助手成片交付。
