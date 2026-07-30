@@ -82,6 +82,12 @@ from .services.keyframes import (
     manifest_document,
     render_manifest_pdf,
 )
+from .services.jianying import build_jianying_package
+from .services.observability import (
+    StructuredRequestLogMiddleware,
+    log_event,
+    public_error,
+)
 from .services.providers import ProviderRequestError
 from .services.segments import (
     SegmentSelectionError,
@@ -106,7 +112,7 @@ settings = get_settings()
 adapter = get_director_adapter()
 media_storage = get_media_storage()
 character_image_adapter = get_character_image_adapter()
-keyframe_image_adapter = get_keyframe_image_adapter()
+keyframe_image_adapter = get_keyframe_image_adapter(settings)
 
 
 @asynccontextmanager
@@ -118,6 +124,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="1.1.0", lifespan=lifespan)
+app.add_middleware(StructuredRequestLogMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
@@ -139,6 +146,9 @@ def health() -> dict[str, str | bool | None]:
         "storage": settings.resolved_storage_mode,
         "durable_storage": settings.resolved_storage_mode == "postgres",
         "media_storage": settings.resolved_media_storage_mode,
+        "keyframe_provider": keyframe_image_adapter.provider,
+        "keyframe_model": keyframe_image_adapter.model,
+        "keyframe_fallback_reason": keyframe_image_adapter.fallback_reason,
     }
 
 
@@ -730,7 +740,7 @@ async def generate_character_references(
                 pass
         raise HTTPException(
             status_code=502,
-            detail=f"Character reference provider failed: {error}",
+            detail=f"Character reference provider failed: {public_error(error, 'provider error')}",
         ) from error
     updated["reference_images"] = [
         *updated.get("reference_images", []),
@@ -851,7 +861,7 @@ async def get_character_reference(
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Character reference media unavailable: {error}",
+            detail=f"Character reference media unavailable: {public_error(error, 'storage error')}",
         ) from error
     extension = {
         "image/svg+xml": "svg",
@@ -999,12 +1009,12 @@ def regenerate_project_shot(
     except (AssetGenerationError, ValueError, StopIteration) as error:
         raise HTTPException(
             status_code=422,
-            detail=f"Single-shot regeneration failed: {error}",
+            detail=f"Single-shot regeneration failed: {public_error(error, 'generation error')}",
         ) from error
     except ProviderRequestError as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Single-shot provider failed: {error}",
+            detail=f"Single-shot provider failed: {public_error(error, 'provider error')}",
         ) from error
     asset = insert_asset_version(
         project_id,
@@ -1126,25 +1136,47 @@ async def start_keyframes(
         task["shot_id"]: task
         for task in (current["payload"]["tasks"] if current else [])
     }
-    tasks = []
+    tasks: list[dict] = []
+    pending: list[tuple[int, dict, int]] = []
     for shot in context["assets"]["shots"]["shots"]:
         if shot["id"] in confirmed_by_shot:
             tasks.append(confirmed_by_shot[shot["id"]])
             continue
-        task = await generate_keyframe_task(
-            project_id=str(project_id),
-            shot=shot,
-            context=context,
-            adapter=keyframe_image_adapter,
-            media_storage=media_storage,
-            attempt=int(current_by_shot.get(shot["id"], {}).get("attempt", 0)) + 1,
+        tasks.append({})
+        pending.append(
+            (
+                len(tasks) - 1,
+                shot,
+                int(current_by_shot.get(shot["id"], {}).get("attempt", 0)) + 1,
+            )
         )
-        tasks.append(task.model_dump(mode="json"))
+    generated = await asyncio.gather(
+        *(
+            generate_keyframe_task(
+                project_id=str(project_id),
+                shot=shot,
+                context=context,
+                adapter=keyframe_image_adapter,
+                media_storage=media_storage,
+                attempt=attempt,
+            )
+            for _, shot, attempt in pending
+        )
+    )
+    for (index, _, _), task in zip(pending, generated, strict=True):
+        tasks[index] = task.model_dump(mode="json")
     asset = _persist_keyframes(
         project_id,
         tasks=tasks,
         context=context,
         prompt="Generate keyframes for every unconfirmed shot",
+    )
+    log_event(
+        "keyframes_batch_completed",
+        project_id=str(project_id),
+        provider=keyframe_image_adapter.provider,
+        succeeded=sum(task["status"] == "succeeded" for task in tasks),
+        failed=sum(task["status"] == "failed" for task in tasks),
     )
     return _keyframe_response(asset)
 
@@ -1217,7 +1249,8 @@ async def retry_failed_keyframes(
     shots = {
         shot["id"]: shot for shot in context["assets"]["shots"]["shots"]
     }
-    tasks = []
+    tasks: list[dict] = []
+    pending: list[tuple[int, dict, int]] = []
     for existing in current["payload"]["tasks"]:
         if existing["status"] != "failed":
             tasks.append(existing)
@@ -1226,15 +1259,29 @@ async def retry_failed_keyframes(
         if not shot:
             tasks.append(existing)
             continue
-        regenerated = await generate_keyframe_task(
-            project_id=str(project_id),
-            shot=shot,
-            context=context,
-            adapter=keyframe_image_adapter,
-            media_storage=media_storage,
-            attempt=int(existing["attempt"]) + 1,
+        tasks.append({})
+        pending.append(
+            (
+                len(tasks) - 1,
+                shot,
+                int(existing["attempt"]) + 1,
+            )
         )
-        tasks.append(regenerated.model_dump(mode="json"))
+    regenerated_tasks = await asyncio.gather(
+        *(
+            generate_keyframe_task(
+                project_id=str(project_id),
+                shot=shot,
+                context=context,
+                adapter=keyframe_image_adapter,
+                media_storage=media_storage,
+                attempt=attempt,
+            )
+            for _, shot, attempt in pending
+        )
+    )
+    for (index, _, _), task in zip(pending, regenerated_tasks, strict=True):
+        tasks[index] = task.model_dump(mode="json")
     asset = _persist_keyframes(
         project_id,
         tasks=tasks,
@@ -1364,6 +1411,54 @@ async def download_keyframe_export(project_id: UUID) -> Response:
     )
 
 
+@app.get("/projects/{project_id}/exports/jianying-assistant.zip")
+async def download_jianying_assistant_package(project_id: UUID) -> Response:
+    asset = _active_keyframe_asset(project_id)
+    context = load_context(project_id)
+    audio = get_latest_audio(project_id)
+    if not audio:
+        raise HTTPException(status_code=409, detail="Upload audio before exporting")
+    missing = [
+        kind
+        for kind in ("segment", "shots", "keyframes")
+        if kind not in context["assets"]
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Create {', '.join(missing)} before exporting",
+        )
+    if any(task["status"] != "succeeded" for task in asset["payload"]["tasks"]):
+        raise HTTPException(
+            status_code=409,
+            detail="All keyframes must succeed before exporting to Jianying Assistant",
+        )
+    try:
+        content = await build_jianying_package(
+            audio=audio,
+            keyframe_asset=asset,
+            context=context,
+            media_storage=media_storage,
+        )
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    log_event(
+        "jianying_handoff_exported",
+        project_id=str(project_id),
+        provider="jianying-assistant",
+        keyframe_count=len(asset["payload"]["tasks"]),
+    )
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="jianying-assistant-handoff.zip"'
+            )
+        },
+    )
+
+
 @app.post("/render/start", status_code=202)
 def start_render(payload: RenderRequest) -> dict:
     context = load_context(payload.project_id)
@@ -1375,4 +1470,10 @@ def start_render(payload: RenderRequest) -> dict:
         "mode": "demo" if settings.adapter_mode == "demo" else "provider",
     }
     job_id = create_render_job(payload.project_id, payload.video_adapter, job)
+    log_event(
+        "render_job_created",
+        project_id=str(payload.project_id),
+        job_id=str(job_id),
+        provider=payload.video_adapter,
+    )
     return {"job_id": job_id, "status": "queued", **job}

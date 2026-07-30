@@ -24,6 +24,7 @@ import {
   ProjectSnapshot,
   KeyframeTask,
   confirmKeyframe,
+  jianyingAssistantExportUrl,
   keyframeExportUrl,
   keyframeImageUrl,
   retryFailedKeyframes,
@@ -1624,13 +1625,16 @@ export default function Home() {
                 {[
                   ["LLM", "Demo Director LLM", "已连接"],
                   ["IMAGE", keyframeTasks[0]?.model || "Deterministic SVG", keyframeTasks.length ? "已连接" : "待运行"],
-                  ["VIDEO", "T013 / 剪映小助手", "下一阶段"],
+                  ["VIDEO", "剪映小助手成片交接包", keyframeProgress.succeeded === keyframeProgress.total && keyframeProgress.total > 0 ? "已连接" : "待关键帧"],
                 ].map(([type, name, status]) => <div className="adapter-row" key={type}><span>{type}</span><strong>{name}</strong><Badge tone={status === "已连接" ? "success" : "neutral"}>{status}</Badge></div>)}
                 {keyframeAsset && (
                   <div className="export-links">
                     <a href={keyframeExportUrl(apiProjectId, "zip")} download>导出 ZIP</a>
                     <a href={keyframeExportUrl(apiProjectId, "pdf")} download>PDF 清单</a>
                     <a href={keyframeExportUrl(apiProjectId, "json")} download>JSON 清单</a>
+                    {keyframeProgress.succeeded === keyframeProgress.total && keyframeProgress.total > 0 && (
+                      <a href={jianyingAssistantExportUrl(apiProjectId)} download>交给剪映小助手</a>
+                    )}
                   </div>
                 )}
               </section>

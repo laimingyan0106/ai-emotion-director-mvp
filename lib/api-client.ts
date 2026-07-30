@@ -507,3 +507,9 @@ export function keyframeExportUrl(
   const suffix = kind === "zip" ? "export.zip" : `manifest.${kind}`;
   return apiAssetUrl(`/projects/${encodeURIComponent(projectId)}/keyframes/${suffix}`);
 }
+
+export function jianyingAssistantExportUrl(projectId: string): string {
+  return apiAssetUrl(
+    `/projects/${encodeURIComponent(projectId)}/exports/jianying-assistant.zip`,
+  );
+}

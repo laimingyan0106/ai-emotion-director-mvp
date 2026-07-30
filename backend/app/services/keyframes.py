@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import io
 import json
 import re
@@ -11,6 +12,9 @@ from html import escape
 from typing import Any
 from uuid import uuid4
 
+import httpx
+
+from ..config import Settings, get_settings
 from ..domain import KeyframeResult, KeyframeTask
 from .storage import MediaStorage
 
@@ -29,6 +33,7 @@ class GeneratedKeyframe:
 class KeyframeImageAdapter(ABC):
     provider = "unknown"
     model = "unknown"
+    fallback_reason: str | None = None
 
     @abstractmethod
     async def generate(self, *, shot_id: str, prompt: str) -> GeneratedKeyframe:
@@ -41,8 +46,13 @@ class DemoKeyframeImageAdapter(KeyframeImageAdapter):
     provider = "demo-keyframe"
     model = "deterministic-svg-v1"
 
-    def __init__(self, fail_shot_ids: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        fail_shot_ids: set[str] | None = None,
+        fallback_reason: str | None = None,
+    ) -> None:
         self.fail_shot_ids = fail_shot_ids or set()
+        self.fallback_reason = fallback_reason
 
     async def generate(self, *, shot_id: str, prompt: str) -> GeneratedKeyframe:
         if shot_id in self.fail_shot_ids:
@@ -76,7 +86,75 @@ class DemoKeyframeImageAdapter(KeyframeImageAdapter):
         )
 
 
-def get_keyframe_image_adapter() -> KeyframeImageAdapter:
+class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
+    provider = "openai"
+
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        api_key = settings.resolved_image_api_key
+        if not api_key:
+            raise ValueError("OpenAI image API key is not configured")
+        self.api_key = api_key
+        self.model = settings.image_model
+        self.base_url = settings.resolved_image_base_url
+        self.quality = settings.image_quality
+        self.size = settings.image_size
+        self.timeout = settings.image_timeout_seconds
+        self.transport = transport
+
+    async def generate(self, *, shot_id: str, prompt: str) -> GeneratedKeyframe:
+        async with httpx.AsyncClient(
+            timeout=self.timeout,
+            transport=self.transport,
+        ) as client:
+            response = await client.post(
+                f"{self.base_url}/images/generations",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "size": self.size,
+                    "quality": self.quality,
+                    "n": 1,
+                    "output_format": "png",
+                },
+            )
+        if response.status_code >= 400:
+            request_id = response.headers.get("x-request-id", "unknown")
+            raise RuntimeError(
+                f"OpenAI image request failed with HTTP {response.status_code}; "
+                f"request_id={request_id}"
+            )
+        try:
+            payload = response.json()
+            content = base64.b64decode(payload["data"][0]["b64_json"], validate=True)
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError("OpenAI image response did not contain valid image data") from error
+        width, height = (int(part) for part in self.size.split("x", maxsplit=1))
+        request_id = response.headers.get("x-request-id")
+        return GeneratedKeyframe(
+            content=content,
+            content_type="image/png",
+            width=width,
+            height=height,
+            provider=self.provider,
+            model=self.model,
+            provider_task_id=request_id or f"openai:{shot_id}:{uuid4().hex[:16]}",
+        )
+
+
+def get_keyframe_image_adapter(
+    settings: Settings | None = None,
+) -> KeyframeImageAdapter:
+    resolved_settings = settings or get_settings()
+    if resolved_settings.adapter_mode == "provider":
+        if resolved_settings.resolved_image_api_key:
+            return OpenAIKeyframeImageAdapter(resolved_settings)
+        return DemoKeyframeImageAdapter(
+            fallback_reason="Provider mode requested but IMAGE_API_KEY/OPENAI_API_KEY is missing"
+        )
     return DemoKeyframeImageAdapter()
 
 

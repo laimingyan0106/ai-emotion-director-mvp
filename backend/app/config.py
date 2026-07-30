@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = Field(default=60, ge=5, le=300)
     llm_http_retries: int = Field(default=2, ge=0, le=5)
     image_api_key: str | None = None
+    image_model: str = "gpt-image-2"
+    image_base_url: str | None = None
+    image_quality: str = "medium"
+    image_size: str = "1280x720"
+    image_timeout_seconds: int = Field(default=150, ge=10, le=300)
     video_api_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
@@ -63,6 +68,14 @@ class Settings(BaseSettings):
     @property
     def resolved_llm_api_key(self) -> str | None:
         return self.llm_api_key or os.getenv("OPENAI_API_KEY")
+
+    @property
+    def resolved_image_api_key(self) -> str | None:
+        return self.image_api_key or os.getenv("OPENAI_API_KEY") or self.resolved_llm_api_key
+
+    @property
+    def resolved_image_base_url(self) -> str:
+        return (self.image_base_url or self.llm_base_url).rstrip("/")
 
 
 @lru_cache

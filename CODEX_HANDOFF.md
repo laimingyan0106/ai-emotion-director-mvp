@@ -1,5 +1,14 @@
 # Codex 接手说明
 
+## v1.1 T013 发布收口（2026-07-30）
+
+- 新增真实 OpenAI 图片 Provider：Provider 模式使用 `gpt-image-2`，关键帧并发生成，`/health` 暴露实际 provider/model/fallback。
+- 新增 JSON 结构化请求日志，包含 request/project/job/provider 追踪字段；Provider 错误和日志统一脱敏。
+- 新增 `/projects/{id}/exports/jianying-assistant.zip`，内含原音频、裁剪区间、镜头时间线、关键帧与剪映小助手提示词。
+- 新增自动发布 E2E，从 WAV 上传和真实分析一直覆盖到剪映交接包；CI 增加 secret scan、Bandit 与生产依赖审计。
+- 数据库无新增表或列，无遗漏 SQL 迁移。全新环境和安全密钥部署步骤见 `docs/DEPLOYMENT.md`。
+- 完成口径：Demo 线上 E2E、真实 Provider 冒烟、前后端全套测试、安全扫描、公开部署全部通过后，才能声明 v1.1 完成。
+
 ## 项目目标
 
 AI 情绪导演把一首歌曲转换成可执行的 30 秒 MV 导演方案，包括音乐情绪分析、World Bible、Character Asset、三幕故事、Shot Card、视频 Prompt 与渲染任务。

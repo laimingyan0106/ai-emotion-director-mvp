@@ -55,3 +55,27 @@ jobs:
           PYTHONPATH: backend
           STORAGE_MODE: sqlite
         run: python -m unittest discover -s backend/tests -v
+
+  security:
+    name: Secret and static security scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Scan tracked files for secrets
+        run: python scripts/secret_scan.py
+
+      - name: Install Bandit
+        run: pip install bandit==1.8.6
+
+      - name: Scan backend Python
+        run: bandit -q -lll -r backend/app
+
+      - name: Audit production npm dependencies
+        run: npm audit --omit=dev --audit-level=high

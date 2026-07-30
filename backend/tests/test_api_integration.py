@@ -126,11 +126,14 @@ def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
 def seed_confirmed_segment(project_id: str, duration: float = 60.0):
     project_uuid = UUID(project_id)
     audio_id = uuid4()
+    seed_path = TEST_ROOT / "media" / f"{project_id}-seed.wav"
+    seed_path.parent.mkdir(parents=True, exist_ok=True)
+    seed_path.write_bytes(sine_wav_bytes())
     save_audio_record(
         audio_id,
         project_uuid,
         "seed.wav",
-        str(TEST_ROOT / "media" / "seed.wav"),
+        str(seed_path),
         "audio/wav",
         1,
     )
@@ -179,6 +182,107 @@ def seed_confirmed_segment(project_id: str, duration: float = 60.0):
 
 
 class ApiIntegrationTest(unittest.TestCase):
+    def test_release_e2e_upload_to_jianying_handoff(self):
+        original_keyframe_adapter = main_module.keyframe_image_adapter
+        main_module.keyframe_image_adapter = DemoKeyframeImageAdapter()
+        try:
+            with TestClient(app) as client:
+                project_id = client.post(
+                    "/project/create",
+                    json={"name": "T013 automated release E2E", "target_duration": 30},
+                ).json()["id"]
+                audio = sine_wav_bytes(duration=31, sample_rate=8000)
+                uploaded = client.post(
+                    "/audio/upload",
+                    data={"project_id": project_id},
+                    files={"audio": ("release-e2e.wav", audio, "audio/wav")},
+                )
+                self.assertEqual(uploaded.status_code, 201)
+                analysis = client.post(
+                    "/audio/analyze",
+                    json={"project_id": project_id},
+                )
+                self.assertEqual(analysis.status_code, 200)
+                self.assertFalse(analysis.json()["payload"]["degraded"])
+
+                recommendations = client.get(
+                    f"/projects/{project_id}/segments/recommendations"
+                )
+                self.assertEqual(recommendations.status_code, 200)
+                chosen = recommendations.json()["candidates"][0]
+                confirmed = client.post(
+                    f"/projects/{project_id}/segments/confirm",
+                    json={
+                        "start": chosen["start"],
+                        "end": chosen["end"],
+                        "category": chosen["category"],
+                        "label": chosen["label"],
+                    },
+                )
+                self.assertEqual(confirmed.status_code, 200)
+
+                self.assertEqual(
+                    client.post("/world/create", json={"project_id": project_id}).status_code,
+                    200,
+                )
+                character = client.post(
+                    "/character/create",
+                    json={"project_id": project_id},
+                ).json()
+                references_response = client.post(
+                    f"/projects/{project_id}/characters/references/generate",
+                    json={"expected_version": character["version"]},
+                )
+                self.assertEqual(references_response.status_code, 200)
+                references = references_response.json()["asset"]["payload"]["reference_images"]
+                locked = client.patch(
+                    f"/projects/{project_id}/characters/references",
+                    json={
+                        "expected_version": references_response.json()["asset"]["version"],
+                        "selected_reference_ids": [item["id"] for item in references],
+                        "locked": True,
+                    },
+                )
+                self.assertEqual(locked.status_code, 200)
+                self.assertEqual(
+                    client.post("/story/create", json={"project_id": project_id}).status_code,
+                    200,
+                )
+                shots_response = client.post(
+                    "/shots/create",
+                    json={"project_id": project_id},
+                )
+                self.assertEqual(shots_response.status_code, 200)
+                shots = deepcopy(shots_response.json()["payload"]["shots"])
+                shots[0]["action"] = f"{shots[0]['action']} · E2E 用户编辑"
+                edited = client.patch(
+                    f"/projects/{project_id}/shots",
+                    json={
+                        "expected_version": shots_response.json()["version"],
+                        "shots": shots,
+                    },
+                )
+                self.assertEqual(edited.status_code, 200)
+                generated = client.post(
+                    f"/projects/{project_id}/keyframes/start",
+                    json={"expected_shots_version": edited.json()["asset"]["version"]},
+                )
+                self.assertEqual(generated.status_code, 200)
+                self.assertEqual(generated.json()["progress"]["succeeded"], 10)
+                handoff = client.get(
+                    f"/projects/{project_id}/exports/jianying-assistant.zip"
+                )
+                self.assertEqual(handoff.status_code, 200)
+                with zipfile.ZipFile(BytesIO(handoff.content)) as archive:
+                    self.assertEqual(archive.testzip(), None)
+                    self.assertIn("剪映小助手提示词.txt", archive.namelist())
+                self.assertEqual(
+                    client.delete(f"/projects/{project_id}").status_code,
+                    204,
+                )
+        finally:
+            main_module.keyframe_image_adapter = original_keyframe_adapter
+
     def test_keyframe_queue_partial_retry_confirmation_and_download_package(self):
         original_adapter = main_module.keyframe_image_adapter
         try:
@@ -329,6 +433,23 @@ class ApiIntegrationTest(unittest.TestCase):
                         archive.read("manifest.json").decode("utf-8")
                     )
                     self.assertEqual(zipped_manifest["tasks"], manifest["tasks"])
+
+                jianying_package = client.get(
+                    f"/projects/{project_id}/exports/jianying-assistant.zip"
+                )
+                self.assertEqual(jianying_package.status_code, 200)
+                with zipfile.ZipFile(BytesIO(jianying_package.content)) as archive:
+                    names = set(archive.namelist())
+                    self.assertIn("剪映小助手提示词.txt", names)
+                    self.assertIn("timeline.json", names)
+                    self.assertTrue(any(name.startswith("source/audio.") for name in names))
+                    self.assertEqual(
+                        len([name for name in names if name.startswith("keyframes/")]),
+                        10,
+                    )
+                    timeline = json.loads(archive.read("timeline.json").decode("utf-8"))
+                    self.assertEqual(timeline["output"]["resolution"], "1920x1080")
+                    self.assertEqual(timeline["audio"]["duration_seconds"], 30)
         finally:
             main_module.keyframe_image_adapter = original_adapter
 

@@ -99,4 +99,6 @@ test("Keyframe queue exposes retries, confirmation locks, and traceable exports"
   assert.match(client, /export function retryFailedKeyframes/);
   assert.match(client, /export function confirmKeyframe/);
   assert.match(client, /export function keyframeExportUrl/);
+  assert.match(client, /export function jianyingAssistantExportUrl/);
+  assert.match(page, /交给剪映小助手/);
 });
