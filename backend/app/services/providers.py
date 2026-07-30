@@ -63,7 +63,6 @@ class OpenAIResponsesClient:
                     {"role": "system", "content": instructions},
                     {"role": "user", "content": schema_prompt},
                 ],
-                "response_format": {"type": "json_object"},
             }
         elif self._api_style == "responses":
             endpoint = f"{self._base_url}/responses"

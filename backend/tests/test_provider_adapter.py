@@ -158,10 +158,7 @@ class ProviderAdapterTest(unittest.TestCase):
         self.assertEqual(result["name"], world_payload()["name"])
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["body"]["messages"][0]["role"], "system")
-        self.assertEqual(
-            captured["body"]["response_format"]["type"],
-            "json_object",
-        )
+        self.assertNotIn("response_format", captured["body"])
         self.assertIn("JSON Schema", captured["body"]["messages"][1]["content"])
 
 
