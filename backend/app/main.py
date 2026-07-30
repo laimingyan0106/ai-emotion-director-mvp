@@ -11,9 +11,14 @@ from .database import (
     create_project_record,
     create_render_job,
     delete_project_record,
+    activate_asset_version,
     database,
+    get_active_asset_snapshot,
+    get_asset_dependency_warnings,
     get_latest_audio,
     get_project_record,
+    insert_asset_version,
+    list_asset_versions,
     list_project_records,
     load_project_context,
     save_audio_analysis,
@@ -21,6 +26,10 @@ from .database import (
     update_project_record,
 )
 from .schemas import (
+    AssetActivateRequest,
+    AssetActivationResponse,
+    AssetVersion,
+    AssetVersionsResponse,
     CharacterRequest,
     PipelineAsset,
     ProjectCreate,
@@ -151,15 +160,61 @@ def analyze_audio(payload: ProjectRef) -> PipelineAsset:
         raise HTTPException(status_code=404, detail="No audio uploaded for project")
     analysis = probe_audio(Path(row["storage_path"]))
     save_audio_analysis(row["id"], analysis)
-    database.insert_asset(payload.project_id, "audio_analysis", analysis)
-    return PipelineAsset(project_id=payload.project_id, kind="audio_analysis", payload=analysis)
+    asset = insert_asset_version(
+        payload.project_id,
+        "audio_analysis",
+        analysis,
+        activate=True,
+        provider="local",
+        model="audio-probe",
+        input_snapshot={},
+    )
+    return PipelineAsset(
+        project_id=payload.project_id,
+        kind="audio_analysis",
+        payload=analysis,
+        asset_id=asset["id"],
+        version=asset["version"],
+        status=asset["status"],
+        is_active=asset["is_active"],
+    )
 
 
 def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     context = load_context(project_id)
-    result = adapter.generate(kind, context)
-    database.insert_asset(project_id, kind, result)
-    return PipelineAsset(project_id=project_id, kind=kind, payload=result)
+    input_snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
+    try:
+        result = adapter.generate(kind, context)
+    except Exception as error:
+        insert_asset_version(
+            project_id,
+            kind,
+            {},
+            activate=False,
+            provider=settings.adapter_mode,
+            model=adapter.__class__.__name__,
+            input_snapshot=input_snapshot,
+            validation_errors=[{"message": str(error)}],
+        )
+        raise HTTPException(status_code=502, detail=f"{kind} generation failed") from error
+    asset = insert_asset_version(
+        project_id,
+        kind,
+        result,
+        activate=True,
+        provider=settings.adapter_mode,
+        model=adapter.__class__.__name__,
+        input_snapshot=input_snapshot,
+    )
+    return PipelineAsset(
+        project_id=project_id,
+        kind=kind,
+        payload=result,
+        asset_id=asset["id"],
+        version=asset["version"],
+        status=asset["status"],
+        is_active=asset["is_active"],
+    )
 
 
 def load_context(project_id: UUID) -> dict:
@@ -167,6 +222,46 @@ def load_context(project_id: UUID) -> dict:
     if not context:
         raise HTTPException(status_code=404, detail="Project not found")
     return context
+
+
+@app.get("/projects/{project_id}/assets", response_model=AssetVersionsResponse)
+def get_project_assets(project_id: UUID) -> AssetVersionsResponse:
+    if not get_project_record(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    groups: dict[str, list[AssetVersion]] = {}
+    for asset in list_asset_versions(project_id):
+        groups.setdefault(asset["kind"], []).append(AssetVersion.model_validate(asset))
+    return AssetVersionsResponse(
+        project_id=project_id,
+        groups=groups,
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/assets/{kind}/activate",
+    response_model=AssetActivationResponse,
+)
+def activate_project_asset(
+    project_id: UUID,
+    kind: str,
+    payload: AssetActivateRequest,
+) -> AssetActivationResponse:
+    try:
+        asset = activate_asset_version(
+            project_id,
+            kind,
+            asset_id=payload.asset_id,
+            version=payload.version,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset version not found")
+    return AssetActivationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
 
 
 @app.post("/world/create", response_model=PipelineAsset)

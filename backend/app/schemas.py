@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProjectCreate(BaseModel):
@@ -32,6 +32,60 @@ class PipelineAsset(BaseModel):
     project_id: UUID
     kind: str
     payload: dict[str, Any]
+    asset_id: int | None = None
+    version: int | None = None
+    status: str | None = None
+    is_active: bool | None = None
+
+
+class AssetVersion(BaseModel):
+    id: int
+    project_id: UUID
+    kind: str
+    payload: dict[str, Any]
+    version: int
+    status: Literal["draft", "active", "archived", "failed"]
+    is_active: bool
+    parent_asset_id: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    prompt: str | None = None
+    input_snapshot: dict[str, Any] = Field(default_factory=dict)
+    validation_errors: list[Any] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class AssetDependencyWarning(BaseModel):
+    asset_id: int
+    kind: str
+    version: int
+    upstream_kind: str
+    expected_asset_id: int
+    active_asset_id: int
+    message: str
+
+
+class AssetVersionsResponse(BaseModel):
+    project_id: UUID
+    groups: dict[str, list[AssetVersion]]
+    warnings: list[AssetDependencyWarning] = Field(default_factory=list)
+
+
+class AssetActivateRequest(BaseModel):
+    asset_id: int | None = Field(default=None, ge=1)
+    version: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def require_exactly_one_selector(self) -> "AssetActivateRequest":
+        if (self.asset_id is None) == (self.version is None):
+            raise ValueError("Provide exactly one of asset_id or version")
+        return self
+
+
+class AssetActivationResponse(BaseModel):
+    asset: AssetVersion
+    warnings: list[AssetDependencyWarning] = Field(default_factory=list)
 
 
 class ProjectResponse(BaseModel):

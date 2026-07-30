@@ -30,6 +30,40 @@ export type ProjectListResponse = {
   total: number;
 };
 
+export type AssetVersion = {
+  id: number;
+  project_id: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  version: number;
+  status: "draft" | "active" | "archived" | "failed";
+  is_active: boolean;
+  parent_asset_id: number | null;
+  provider: string | null;
+  model: string | null;
+  prompt: string | null;
+  input_snapshot: Record<string, { asset_id: number; version: number }>;
+  validation_errors: unknown[];
+  created_at: string;
+  updated_at: string | null;
+};
+
+export type AssetDependencyWarning = {
+  asset_id: number;
+  kind: string;
+  version: number;
+  upstream_kind: string;
+  expected_asset_id: number;
+  active_asset_id: number;
+  message: string;
+};
+
+export type AssetVersionsResponse = {
+  project_id: string;
+  groups: Record<string, AssetVersion[]>;
+  warnings: AssetDependencyWarning[];
+};
+
 export type UploadResponse = {
   project_id: string;
   audio_id: string;
@@ -126,4 +160,25 @@ export function deleteProject(projectId: string): Promise<void> {
   return request<void>(`/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
   });
+}
+
+export function fetchAssetVersions(projectId: string): Promise<AssetVersionsResponse> {
+  return request<AssetVersionsResponse>(
+    `/projects/${encodeURIComponent(projectId)}/assets`,
+  );
+}
+
+export function activateAssetVersion(
+  projectId: string,
+  kind: string,
+  selector: { asset_id: number } | { version: number },
+): Promise<{ asset: AssetVersion; warnings: AssetDependencyWarning[] }> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(kind)}/activate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(selector),
+    },
+  );
 }

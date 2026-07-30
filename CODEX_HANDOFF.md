@@ -145,3 +145,29 @@ docker compose up --build
   - Blob 与数据库凭据仅由 Vercel 环境注入，未提交到仓库
 - 已知限制：生产音频上传仍受 Vercel Function 请求体限制；大文件直传将在后续音频管线任务中处理。
 - 下一任务：`V11-T004`，实现资产版本管理、唯一激活版本和回滚依赖警告。
+
+### V11-T004：资产版本管理与激活/回滚
+
+- 状态：完成
+- 数据库迁移：
+  - `generated_assets` 新增 `status`、`is_active`、`parent_asset_id`、`provider`、`model`、`prompt`、`input_snapshot`、`validation_errors`、`updated_at`
+  - 新增 `(project_id, kind, version)` 唯一索引
+  - 新增 `(project_id, kind) WHERE is_active` 部分唯一索引，数据库层保证同类资产至多一个激活版本
+  - PostgreSQL 使用事务级 advisory lock，SQLite 使用 `BEGIN IMMEDIATE`，并发生成时版本号仍连续且唯一
+- 版本行为：
+  - 成功生成先写入 draft，再在同一事务内归档旧版本并激活新版本
+  - 失败生成保留为 failed 版本，不替换当前激活版本
+  - 新版本通过 `parent_asset_id` 保留同类版本谱系，通过 `input_snapshot` 固化上游激活资产 ID 与版本
+  - 项目上下文只读取 `is_active=true` 的资产，禁止用 `created_at` 覆盖同类资产
+- API 变更：
+  - 新增 `GET /projects/{project_id}/assets`
+  - 新增 `POST /projects/{project_id}/assets/{kind}/activate`
+  - World、Character、Story、Shots 和 audio_analysis 响应增加 `asset_id`、`version`、`status`、`is_active`
+  - 回滚后返回下游依赖不匹配警告；failed 版本禁止激活
+- 验证结果：
+  - 后端 7/7 测试 PASS
+  - 6 线程并发创建同类资产，版本号 1–6 连续唯一且仅一个激活版本
+  - 回滚后 Character 上游 World 依赖警告 PASS
+  - failed 版本不替换激活版本且激活请求返回 409
+  - `npm test`、`npm run lint`、Python compileall PASS
+- 下一任务：`V11-T005`，实现 World、Character、Story、Shots 严格 Schema 校验、结构化错误与自动重试。

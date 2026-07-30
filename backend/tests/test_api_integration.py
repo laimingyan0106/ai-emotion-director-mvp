@@ -1,7 +1,9 @@
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
@@ -12,7 +14,12 @@ os.environ["SQLITE_PATH"] = str(TEST_ROOT / "test.db")
 os.environ["MEDIA_ROOT"] = str(TEST_ROOT / "media")
 
 from app.main import app  # noqa: E402
-from app.database import count_project_dependents  # noqa: E402
+from app.database import (  # noqa: E402
+    count_project_dependents,
+    insert_asset_version,
+    list_asset_versions,
+    load_project_context,
+)
 
 
 class ApiIntegrationTest(unittest.TestCase):
@@ -107,6 +114,94 @@ class ApiIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(client.get(f"/projects/{project_id}").status_code, 404)
             self.assertFalse((TEST_ROOT / "media" / "projects" / project_id).exists())
+
+    def test_asset_versions_are_concurrent_safe_and_only_one_is_active(self):
+        with TestClient(app) as client:
+            project_id = UUID(
+                client.post("/project/create", json={"name": "Concurrent versions"}).json()["id"]
+            )
+
+            def create_version(index: int):
+                return insert_asset_version(
+                    project_id,
+                    "world",
+                    {"marker": index},
+                    activate=True,
+                    provider="test",
+                    model="concurrent",
+                )
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                list(executor.map(create_version, range(6)))
+
+            versions = list_asset_versions(project_id, "world")
+            self.assertEqual(sorted(asset["version"] for asset in versions), list(range(1, 7)))
+            self.assertEqual(sum(asset["is_active"] for asset in versions), 1)
+            self.assertEqual(
+                client.get(f"/projects/{project_id}/assets").status_code,
+                200,
+            )
+
+    def test_asset_rollback_warns_downstream_and_failed_version_stays_inactive(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "Rollback dependencies"},
+            ).json()["id"]
+            world_v1 = client.post("/world/create", json={"project_id": project_id}).json()
+            world_v2 = client.post("/world/create", json={"project_id": project_id}).json()
+            character = client.post(
+                "/character/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(character.status_code, 200)
+
+            failed = insert_asset_version(
+                UUID(project_id),
+                "world",
+                {},
+                activate=False,
+                provider="test",
+                model="broken",
+                validation_errors=[{"message": "invalid payload"}],
+            )
+            self.assertEqual(failed["status"], "failed")
+            active_before = next(
+                asset
+                for asset in list_asset_versions(UUID(project_id), "world")
+                if asset["is_active"]
+            )
+            self.assertEqual(active_before["id"], world_v2["asset_id"])
+
+            rollback = client.post(
+                f"/projects/{project_id}/assets/world/activate",
+                json={"version": world_v1["version"]},
+            )
+            self.assertEqual(rollback.status_code, 200)
+            body = rollback.json()
+            self.assertEqual(body["asset"]["id"], world_v1["asset_id"])
+            self.assertTrue(
+                any(
+                    warning["kind"] == "character"
+                    and warning["upstream_kind"] == "world"
+                    for warning in body["warnings"]
+                )
+            )
+
+            world_versions = list_asset_versions(UUID(project_id), "world")
+            self.assertEqual(sum(asset["is_active"] for asset in world_versions), 1)
+            self.assertFalse(next(asset for asset in world_versions if asset["id"] == failed["id"])["is_active"])
+            context = load_project_context(UUID(project_id))
+            self.assertEqual(
+                context["asset_versions"]["world"]["asset_id"],
+                world_v1["asset_id"],
+            )
+
+            failed_activation = client.post(
+                f"/projects/{project_id}/assets/world/activate",
+                json={"asset_id": failed["id"]},
+            )
+            self.assertEqual(failed_activation.status_code, 409)
 
 
 if __name__ == "__main__":

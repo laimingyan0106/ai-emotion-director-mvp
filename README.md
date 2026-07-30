@@ -31,6 +31,8 @@ docker compose up --build
 - `GET /projects/{project_id}`
 - `PATCH /projects/{project_id}`
 - `DELETE /projects/{project_id}`
+- `GET /projects/{project_id}/assets`
+- `POST /projects/{project_id}/assets/{kind}/activate`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -47,6 +49,7 @@ docker compose up --build
 - 公开 FastAPI：`https://ai-emotion-director-api.vercel.app`
 - 前端通过 `NEXT_PUBLIC_API_BASE_URL` 选择真实 API；未配置时自动进入完整 Demo 模式。
 - 当前托管 API 使用 Neon PostgreSQL 与私有 Vercel Blob；项目、音频元数据和关联资产可跨请求、跨设备恢复。
+- 生成资产按项目与类型保留完整版本历史；成功版本原子激活，失败版本仅留档，回滚会返回下游依赖警告。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 
