@@ -88,6 +88,35 @@ class AssetActivationResponse(BaseModel):
     warnings: list[AssetDependencyWarning] = Field(default_factory=list)
 
 
+class SegmentCandidate(BaseModel):
+    category: Literal["highlight", "turn", "stable"]
+    label: str
+    start: float
+    end: float
+    duration: float
+    score: float
+    reason: str
+
+
+class SegmentRecommendationsResponse(BaseModel):
+    project_id: UUID
+    target_duration: float
+    audio_duration: float
+    candidates: list[SegmentCandidate]
+
+
+class SegmentConfirmRequest(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    category: Literal["highlight", "turn", "stable", "custom"] = "custom"
+    label: str = Field(default="自定义片段", min_length=1, max_length=80)
+
+
+class SegmentConfirmationResponse(BaseModel):
+    asset: AssetVersion
+    warnings: list[AssetDependencyWarning] = Field(default_factory=list)
+
+
 class ProjectResponse(BaseModel):
     id: UUID
     name: str

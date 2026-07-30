@@ -8,6 +8,7 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import UUID
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -24,8 +25,11 @@ from app.database import (  # noqa: E402
     insert_asset_version,
     list_asset_versions,
     load_project_context,
+    save_audio_record,
 )
 from app.services.adapters import DirectorAdapter  # noqa: E402
+from app.services.audio import demo_analysis  # noqa: E402
+from app.services.segments import restrict_context_to_confirmed_segment  # noqa: E402
 
 
 class AlwaysMalformedAdapter(DirectorAdapter):
@@ -48,6 +52,61 @@ def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
         ]
         output.writeframes(b"".join(frames))
     return buffer.getvalue()
+
+
+def seed_confirmed_segment(project_id: str, duration: float = 60.0):
+    project_uuid = UUID(project_id)
+    audio_id = uuid4()
+    save_audio_record(
+        audio_id,
+        project_uuid,
+        "seed.wav",
+        str(TEST_ROOT / "media" / "seed.wav"),
+        "audio/wav",
+        1,
+    )
+    analysis = demo_analysis()
+    analysis["duration"] = duration
+    analysis["energy_curve"] = [
+        round((math.sin(index / 8) + 1) / 2, 4)
+        for index in range(100)
+    ]
+    analysis["emotion_curve"] = [
+        round(value * 100)
+        for value in analysis["energy_curve"]
+    ]
+    analysis_asset = insert_asset_version(
+        project_uuid,
+        "audio_analysis",
+        analysis,
+        activate=True,
+        provider="test",
+        model="fixture",
+    )
+    segment = insert_asset_version(
+        project_uuid,
+        "segment",
+        {
+            "start": 0,
+            "end": 30,
+            "duration": 30,
+            "category": "custom",
+            "label": "测试片段",
+            "confirmed": True,
+            "audio_id": str(audio_id),
+            "audio_analysis_asset_id": analysis_asset["id"],
+        },
+        activate=True,
+        provider="test",
+        model="fixture",
+        input_snapshot={
+            "audio_analysis": {
+                "asset_id": analysis_asset["id"],
+                "version": analysis_asset["version"],
+            }
+        },
+    )
+    return analysis_asset, segment
 
 
 class ApiIntegrationTest(unittest.TestCase):
@@ -154,6 +213,7 @@ class ApiIntegrationTest(unittest.TestCase):
                 files={"audio": ("delete.wav", b"RIFF-delete-me", "audio/wav")},
             )
             self.assertEqual(uploaded.status_code, 201)
+            seed_confirmed_segment(project_id)
             self.assertEqual(client.post("/world/create", json={"project_id": project_id}).status_code, 200)
             self.assertEqual(client.post("/character/create", json={"project_id": project_id}).status_code, 200)
             self.assertEqual(client.post("/story/create", json={"project_id": project_id}).status_code, 200)
@@ -207,6 +267,7 @@ class ApiIntegrationTest(unittest.TestCase):
                 "/project/create",
                 json={"name": "Rollback dependencies"},
             ).json()["id"]
+            seed_confirmed_segment(project_id)
             world_v1 = client.post("/world/create", json={"project_id": project_id}).json()
             world_v2 = client.post("/world/create", json={"project_id": project_id}).json()
             character = client.post(
@@ -268,6 +329,7 @@ class ApiIntegrationTest(unittest.TestCase):
                 "/project/create",
                 json={"name": "Schema failure isolation"},
             ).json()["id"]
+            seed_confirmed_segment(project_id)
             active = client.post(
                 "/world/create",
                 json={"project_id": project_id},
@@ -296,6 +358,107 @@ class ApiIntegrationTest(unittest.TestCase):
             failed = next(asset for asset in versions if asset["status"] == "failed")
             self.assertFalse(failed["is_active"])
             self.assertTrue(failed["validation_errors"])
+
+    def test_segment_recommend_confirm_bounds_and_dependency_invalidation(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "Segment selection", "target_duration": 30},
+            ).json()["id"]
+            _, original_segment = seed_confirmed_segment(project_id, duration=90)
+
+            recommendations = client.get(
+                f"/projects/{project_id}/segments/recommendations"
+            )
+            self.assertEqual(recommendations.status_code, 200)
+            self.assertEqual(
+                {item["category"] for item in recommendations.json()["candidates"]},
+                {"highlight", "turn", "stable"},
+            )
+
+            custom = client.post(
+                f"/projects/{project_id}/segments/confirm",
+                json={
+                    "start": 10,
+                    "end": 40,
+                    "category": "custom",
+                    "label": "10-40s",
+                },
+            )
+            self.assertEqual(custom.status_code, 200)
+            custom_segment = custom.json()["asset"]
+            self.assertEqual(custom_segment["payload"]["start"], 10)
+            self.assertNotEqual(custom_segment["id"], original_segment["id"])
+
+            world = client.post(
+                "/world/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(world.status_code, 200)
+            world_asset = next(
+                asset
+                for asset in list_asset_versions(UUID(project_id), "world")
+                if asset["is_active"]
+            )
+            self.assertEqual(
+                world_asset["input_snapshot"]["segment"]["asset_id"],
+                custom_segment["id"],
+            )
+
+            switched = client.post(
+                f"/projects/{project_id}/segments/confirm",
+                json={
+                    "start": 20,
+                    "end": 50,
+                    "category": "custom",
+                    "label": "20-50s",
+                },
+            )
+            self.assertEqual(switched.status_code, 200)
+            self.assertTrue(
+                any(
+                    warning["kind"] == "world"
+                    and warning["upstream_kind"] == "segment"
+                    for warning in switched.json()["warnings"]
+                )
+            )
+
+            invalid_duration = client.post(
+                f"/projects/{project_id}/segments/confirm",
+                json={"start": 10, "end": 35},
+            )
+            self.assertEqual(invalid_duration.status_code, 422)
+            outside_bounds = client.post(
+                f"/projects/{project_id}/segments/confirm",
+                json={"start": 70, "end": 100},
+            )
+            self.assertEqual(outside_bounds.status_code, 422)
+
+            context = restrict_context_to_confirmed_segment(
+                load_project_context(UUID(project_id))
+            )
+            self.assertEqual(context["assets"]["audio_analysis"]["duration"], 30)
+            self.assertEqual(
+                context["assets"]["audio_analysis"]["source_duration"],
+                90,
+            )
+            self.assertLess(
+                len(context["assets"]["audio_analysis"]["energy_curve"]),
+                100,
+            )
+
+    def test_short_audio_cannot_produce_thirty_second_recommendations(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "Short audio", "target_duration": 30},
+            ).json()["id"]
+            seed_confirmed_segment(project_id, duration=20)
+            response = client.get(
+                f"/projects/{project_id}/segments/recommendations"
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("shorter than target", response.json()["detail"])
 
 
 if __name__ == "__main__":

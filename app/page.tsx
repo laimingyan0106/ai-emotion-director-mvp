@@ -3,18 +3,23 @@
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  analyzeAudio,
   checkHealth,
+  confirmSegment,
   createProject,
   deleteProject,
   fetchProject,
   fetchProjects,
+  fetchAssetVersions,
+  fetchSegmentRecommendations,
   getApiMode,
   ProjectSnapshot,
+  SegmentCandidate,
   updateProject,
   uploadAudio,
 } from "../lib/api-client";
 
-type Stage = "idle" | "analyzing" | "ready" | "rendering";
+type Stage = "idle" | "analyzing" | "selecting" | "ready" | "rendering";
 type ConnectionState = "demo" | "checking" | "real" | "error";
 type View =
   | "dashboard"
@@ -151,9 +156,20 @@ const shots: Shot[] = [
 
 const curve = [14, 18, 27, 38, 34, 48, 62, 58, 76, 88, 72, 91, 68, 54, 47, 62, 44, 31, 24, 18];
 
-function EmotionCurve() {
-  const points = curve
-    .map((value, index) => `${(index / (curve.length - 1)) * 100},${100 - value}`)
+function EmotionCurve({
+  values = curve,
+  duration = 30,
+  selection,
+}: {
+  values?: number[];
+  duration?: number;
+  selection?: { start: number; end: number } | null;
+}) {
+  const normalized = values.length
+    ? values.map((value) => value <= 1 ? value * 100 : value)
+    : curve;
+  const points = normalized
+    .map((value, index) => `${(index / Math.max(normalized.length - 1, 1)) * 100},${100 - value}`)
     .join(" ");
   return (
     <div className="curve" aria-label="歌曲情绪强度曲线">
@@ -165,9 +181,23 @@ function EmotionCurve() {
           </linearGradient>
         </defs>
         <polygon points={`0,100 ${points} 100,100`} fill="url(#curve-fill)" />
+        {selection && duration > 0 && (
+          <rect
+            x={(selection.start / duration) * 100}
+            width={((selection.end - selection.start) / duration) * 100}
+            y="0"
+            height="100"
+            fill="#f0c36a"
+            opacity=".12"
+          />
+        )}
         <polyline points={points} fill="none" stroke="#f0c36a" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
       </svg>
-      <div className="curve-labels"><span>00:00</span><span>情绪峰值 00:17</span><span>00:30</span></div>
+      <div className="curve-labels">
+        <span>00:00</span>
+        <span>{selection ? `已选 ${selection.start.toFixed(1)}–${selection.end.toFixed(1)}s` : "等待选择片段"}</span>
+        <span>{duration.toFixed(1)}s</span>
+      </div>
     </div>
   );
 }
@@ -192,6 +222,15 @@ export default function Home() {
   const [projects, setProjects] = useState<ProjectSnapshot[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(getApiMode() === "real");
   const [savingProject, setSavingProject] = useState(false);
+  const [segmentOptions, setSegmentOptions] = useState<SegmentCandidate[]>([]);
+  const [segmentStart, setSegmentStart] = useState(0);
+  const [segmentEnd, setSegmentEnd] = useState(30);
+  const [segmentCategory, setSegmentCategory] = useState<SegmentCandidate["category"] | "custom">("custom");
+  const [segmentLabel, setSegmentLabel] = useState("自定义片段");
+  const [audioDuration, setAudioDuration] = useState(30);
+  const [energyCurve, setEnergyCurve] = useState<number[]>(curve);
+  const [segmentBusy, setSegmentBusy] = useState(false);
+  const [segmentConfirmed, setSegmentConfirmed] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const lastSavedName = useRef(projectName);
 
@@ -209,8 +248,7 @@ export default function Home() {
           setApiProjectId(project.id);
           setRemoteAudio(project.audio);
           if (project.audio) {
-            setStage("ready");
-            setProgress(100);
+            await restoreProjectSegment(project.id);
           }
         } else {
           await checkHealth();
@@ -246,7 +284,7 @@ export default function Home() {
   }, [apiProjectId, projectName]);
 
   const completedStage = Math.min(stages.length, Math.floor((progress / 100) * stages.length));
-  const statusText = stage === "idle" ? "等待素材" : stage === "analyzing" ? `导演处理中 ${progress}%` : stage === "rendering" ? "渲染中" : "方案已生成";
+  const statusText = stage === "idle" ? "等待素材" : stage === "analyzing" ? `音频分析中 ${progress}%` : stage === "selecting" ? "等待确认 30 秒片段" : stage === "rendering" ? "渲染中" : "方案已生成";
   const chosenShot = shots[activeShot];
   const totalDuration = useMemo(() => shots.length * 3, []);
 
@@ -261,6 +299,8 @@ export default function Home() {
     setProjectName(candidate.name.replace(/\.[^.]+$/, "") || "未命名项目");
     setStage("idle");
     setProgress(0);
+    setSegmentOptions([]);
+    setSegmentConfirmed(false);
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -294,6 +334,44 @@ export default function Home() {
     }, 160);
   }
 
+  async function restoreProjectSegment(projectId: string) {
+    const versions = await fetchAssetVersions(projectId);
+    const activeSegment = versions.groups.segment?.find((asset) => asset.is_active);
+    const activeAnalysis = versions.groups.audio_analysis?.find((asset) => asset.is_active);
+    if (activeAnalysis) {
+      const values = activeAnalysis.payload.energy_curve;
+      if (Array.isArray(values)) {
+        setEnergyCurve(values.map((value) => Number(value)));
+      }
+      setAudioDuration(Number(activeAnalysis.payload.duration || 30));
+    }
+    if (activeSegment) {
+      setSegmentStart(Number(activeSegment.payload.start));
+      setSegmentEnd(Number(activeSegment.payload.end));
+      setSegmentCategory((activeSegment.payload.category as SegmentCandidate["category"] | "custom") || "custom");
+      setSegmentLabel(String(activeSegment.payload.label || "已确认片段"));
+      setSegmentConfirmed(true);
+      setStage("ready");
+      setProgress(100);
+    } else if (activeAnalysis) {
+      const recommendations = await fetchSegmentRecommendations(projectId);
+      const preferred = recommendations.candidates[0];
+      setSegmentOptions(recommendations.candidates);
+      setAudioDuration(recommendations.audio_duration);
+      setSegmentStart(preferred.start);
+      setSegmentEnd(preferred.end);
+      setSegmentCategory(preferred.category);
+      setSegmentLabel(preferred.label);
+      setSegmentConfirmed(false);
+      setStage("selecting");
+      setProgress(78);
+    } else {
+      setSegmentConfirmed(false);
+      setStage("idle");
+      setProgress(0);
+    }
+  }
+
   async function openRemoteProject(projectId: string) {
     setApiError("");
     try {
@@ -303,8 +381,12 @@ export default function Home() {
       setApiProjectId(project.id);
       setRemoteAudio(project.audio);
       setFile(null);
-      setStage(project.audio ? "ready" : "idle");
-      setProgress(project.audio ? 100 : 0);
+      if (project.audio) {
+        await restoreProjectSegment(project.id);
+      } else {
+        setStage("idle");
+        setProgress(0);
+      }
       const url = new URL(window.location.href);
       url.searchParams.set("project_id", project.id);
       window.history.replaceState({}, "", url);
@@ -328,6 +410,8 @@ export default function Home() {
         lastSavedName.current = "未命名导演项目";
         setStage("idle");
         setProgress(0);
+        setSegmentOptions([]);
+        setSegmentConfirmed(false);
         const url = new URL(window.location.href);
         url.searchParams.delete("project_id");
         window.history.replaceState({}, "", url);
@@ -355,7 +439,7 @@ export default function Home() {
       const project = await createProject(projectName, 30);
       setProgress(42);
       const uploaded = await uploadAudio(project.id, file);
-      setProgress(68);
+      setProgress(52);
       setApiProjectId(project.id);
       lastSavedName.current = project.name;
       setRemoteAudio({ filename: uploaded.filename, size_bytes: uploaded.size });
@@ -365,13 +449,81 @@ export default function Home() {
       const url = new URL(window.location.href);
       url.searchParams.set("project_id", project.id);
       window.history.replaceState({}, "", url);
-      showToast("项目与音频已保存到真实 API");
-      runDemoPipeline();
+      const analysis = await analyzeAudio(project.id);
+      setProgress(74);
+      const analysisCurve = analysis.payload.energy_curve;
+      if (Array.isArray(analysisCurve)) {
+        setEnergyCurve(analysisCurve.map((value) => Number(value)));
+      }
+      setAudioDuration(Number(analysis.payload.duration || 30));
+      const recommendations = await fetchSegmentRecommendations(project.id);
+      const preferred = recommendations.candidates[0];
+      setSegmentOptions(recommendations.candidates);
+      setAudioDuration(recommendations.audio_duration);
+      setSegmentStart(preferred.start);
+      setSegmentEnd(preferred.end);
+      setSegmentCategory(preferred.category);
+      setSegmentLabel(preferred.label);
+      setSegmentConfirmed(false);
+      setStage("selecting");
+      setProgress(78);
+      showToast("真实音频分析完成，请确认导演使用的 30 秒片段");
     } catch (error) {
       setStage("idle");
       setProgress(0);
       setConnection("error");
       setApiError(error instanceof ApiError ? error.message : "项目上传失败，请稍后重试。");
+    }
+  }
+
+  function chooseSegment(candidate: SegmentCandidate) {
+    setSegmentStart(candidate.start);
+    setSegmentEnd(candidate.end);
+    setSegmentCategory(candidate.category);
+    setSegmentLabel(candidate.label);
+    setSegmentConfirmed(false);
+  }
+
+  function moveSegmentStart(value: number) {
+    const bounded = Math.max(0, Math.min(value, audioDuration - 30));
+    setSegmentStart(bounded);
+    setSegmentEnd(bounded + 30);
+    setSegmentCategory("custom");
+    setSegmentLabel("自定义片段");
+    setSegmentConfirmed(false);
+  }
+
+  function moveSegmentEnd(value: number) {
+    const bounded = Math.max(30, Math.min(value, audioDuration));
+    setSegmentEnd(bounded);
+    setSegmentStart(bounded - 30);
+    setSegmentCategory("custom");
+    setSegmentLabel("自定义片段");
+    setSegmentConfirmed(false);
+  }
+
+  async function confirmCurrentSegment() {
+    if (!apiProjectId) return;
+    setSegmentBusy(true);
+    setApiError("");
+    try {
+      const confirmed = await confirmSegment(apiProjectId, {
+        start: Number(segmentStart.toFixed(3)),
+        end: Number(segmentEnd.toFixed(3)),
+        category: segmentCategory,
+        label: segmentLabel,
+      });
+      setSegmentConfirmed(true);
+      setStage("ready");
+      setProgress(100);
+      showToast(confirmed.warnings.length
+        ? `片段已切换，${confirmed.warnings.length} 个下游资产需要重新生成`
+        : "30 秒导演片段已确认");
+      window.setTimeout(() => setView("world"), 450);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "片段确认失败。");
+    } finally {
+      setSegmentBusy(false);
     }
   }
 
@@ -489,8 +641,8 @@ export default function Home() {
                 <input ref={fileInput} type="file" accept="audio/*,.mp3,.wav,.m4a,.flac" onChange={handleFile} hidden />
                 <div className="upload-actions">
                   <button className="text-button" onClick={loadDemo}>载入示例工程</button>
-                  <button className="primary-button" onClick={generate} disabled={stage === "analyzing"}>
-                    {stage === "analyzing" ? `生成中 ${progress}%` : "开始导演"}
+                  <button className="primary-button" onClick={generate} disabled={stage === "analyzing" || stage === "selecting"}>
+                    {stage === "analyzing" ? `分析中 ${progress}%` : stage === "selecting" ? "请先确认片段" : "开始导演"}
                   </button>
                 </div>
               </section>
@@ -502,10 +654,78 @@ export default function Home() {
                   <div><small>KEY</small><strong>{file || remoteAudio ? "D min" : "—"}</strong></div>
                   <div><small>ENERGY</small><strong>{file || remoteAudio ? "74%" : "—"}</strong></div>
                 </div>
-                {file || remoteAudio ? <EmotionCurve /> : <div className="empty-curve"><span>等待音频分析</span></div>}
-                <div className="mood-line"><span>主情绪</span><strong>{file || remoteAudio ? "克制的思念" : "—"}</strong></div>
+                {file || remoteAudio ? (
+                  <EmotionCurve
+                    values={energyCurve}
+                    duration={audioDuration}
+                    selection={segmentOptions.length || segmentConfirmed ? { start: segmentStart, end: segmentEnd } : null}
+                  />
+                ) : <div className="empty-curve"><span>等待音频分析</span></div>}
+                <div className="mood-line"><span>分析边界</span><strong>{file || remoteAudio ? "音乐结构信号，不作心理诊断" : "—"}</strong></div>
               </section>
             </div>
+
+            {(segmentOptions.length > 0 || segmentConfirmed) && (
+              <section className="segment-selector panel" aria-label="30 秒导演片段">
+                <div className="section-heading">
+                  <div><span>SEGMENT / 03</span><h2>确认导演使用的 30 秒</h2></div>
+                  <Badge tone={segmentConfirmed ? "success" : "gold"}>
+                    {segmentConfirmed ? "已确认" : "等待确认"}
+                  </Badge>
+                </div>
+                {segmentOptions.length > 0 && (
+                  <div className="segment-candidates">
+                    {segmentOptions.map((candidate) => (
+                      <button
+                        key={candidate.category}
+                        className={candidate.category === segmentCategory ? "active" : ""}
+                        onClick={() => chooseSegment(candidate)}
+                      >
+                        <strong>{candidate.label}</strong>
+                        <span>{candidate.start.toFixed(1)}–{candidate.end.toFixed(1)}s</span>
+                        <small>{candidate.reason}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="segment-range-grid">
+                  <label>
+                    <span>片段起点 <strong>{segmentStart.toFixed(1)}s</strong></span>
+                    <input
+                      aria-label="片段起点"
+                      type="range"
+                      min="0"
+                      max={Math.max(audioDuration - 30, 0)}
+                      step="0.1"
+                      value={segmentStart}
+                      onChange={(event) => moveSegmentStart(Number(event.target.value))}
+                    />
+                  </label>
+                  <label>
+                    <span>片段终点 <strong>{segmentEnd.toFixed(1)}s</strong></span>
+                    <input
+                      aria-label="片段终点"
+                      type="range"
+                      min="30"
+                      max={Math.max(audioDuration, 30)}
+                      step="0.1"
+                      value={segmentEnd}
+                      onChange={(event) => moveSegmentEnd(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+                <div className="segment-confirm-row">
+                  <p>固定时长 30.0s · 音频总长 {audioDuration.toFixed(1)}s · 服务端会再次校验边界</p>
+                  <button
+                    className="primary-button"
+                    onClick={() => void confirmCurrentSegment()}
+                    disabled={segmentBusy || segmentConfirmed}
+                  >
+                    {segmentBusy ? "确认中…" : segmentConfirmed ? "片段已确认" : "确认这个 30 秒片段"}
+                  </button>
+                </div>
+              </section>
+            )}
 
             <section className="pipeline">
               <div className="section-heading">

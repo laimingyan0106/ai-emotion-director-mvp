@@ -94,6 +94,23 @@ class ShotSetAsset(StrictDomainModel):
         return self
 
 
+class ConfirmedSegmentAsset(StrictDomainModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    duration: float = Field(gt=0, le=180)
+    category: Literal["highlight", "turn", "stable", "custom"]
+    label: str = Field(min_length=1, max_length=80)
+    confirmed: Literal[True]
+    audio_id: str = Field(min_length=1, max_length=80)
+    audio_analysis_asset_id: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "ConfirmedSegmentAsset":
+        if abs((self.end - self.start) - self.duration) > 0.001:
+            raise ValueError("Segment end-start must equal duration")
+        return self
+
+
 DOMAIN_MODELS: dict[str, type[StrictDomainModel]] = {
     "world": WorldAsset,
     "character": CharacterAsset,

@@ -33,6 +33,8 @@ docker compose up --build
 - `DELETE /projects/{project_id}`
 - `GET /projects/{project_id}/assets`
 - `POST /projects/{project_id}/assets/{kind}/activate`
+- `GET /projects/{project_id}/segments/recommendations`
+- `POST /projects/{project_id}/segments/confirm`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -52,6 +54,7 @@ docker compose up --build
 - 生成资产按项目与类型保留完整版本历史；成功版本原子激活，失败版本仅留档，回滚会返回下游依赖警告。
 - World、Character、Story、ShotSet 使用严格 Pydantic 领域模型；畸形输出会按 `GENERATION_RETRY_ATTEMPTS` 自动修复重试，最终失败不会替换激活版本。
 - 音频分析使用 librosa 与 FFmpeg 提取节拍、起音、RMS、频谱质心、chroma、能量曲线、静音段和峰值候选；失败会明确标记 `degraded`，不会把这些信号宣称为心理学情绪识别。
+- 音频分析后提供高潮、叙事转折、平稳三类 30 秒候选；用户可拖动起止点并显式确认，未确认片段时 World/Character/Story/Shots API 返回 409。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 

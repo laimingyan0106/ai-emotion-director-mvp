@@ -41,11 +41,20 @@ from .schemas import (
     ProjectSnapshot,
     ProjectUpdate,
     RenderRequest,
+    SegmentConfirmRequest,
+    SegmentConfirmationResponse,
+    SegmentRecommendationsResponse,
     UploadResponse,
 )
 from .services.adapters import get_director_adapter
 from .services.audio import analyze_audio_file, demo_analysis
 from .services.generation import AssetGenerationError, generate_validated_asset
+from .services.segments import (
+    SegmentSelectionError,
+    recommend_segments,
+    restrict_context_to_confirmed_segment,
+    validate_confirmed_segment,
+)
 from .services.storage import get_media_storage
 
 settings = get_settings()
@@ -240,6 +249,10 @@ async def analyze_audio(payload: ProjectRef) -> PipelineAsset:
 
 def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     context = load_context(project_id)
+    try:
+        context = restrict_context_to_confirmed_segment(context)
+    except SegmentSelectionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     input_snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
     try:
         generation = generate_validated_asset(
@@ -330,6 +343,99 @@ def activate_project_asset(
     if not asset:
         raise HTTPException(status_code=404, detail="Asset version not found")
     return AssetActivationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.get(
+    "/projects/{project_id}/segments/recommendations",
+    response_model=SegmentRecommendationsResponse,
+)
+def get_segment_recommendations(
+    project_id: UUID,
+) -> SegmentRecommendationsResponse:
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    analysis_asset = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "audio_analysis")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not analysis_asset:
+        raise HTTPException(
+            status_code=409,
+            detail="Analyze audio before selecting a segment",
+        )
+    analysis = analysis_asset["payload"]
+    try:
+        candidates = recommend_segments(
+            analysis,
+            target_duration=float(project["target_duration"]),
+        )
+    except SegmentSelectionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return SegmentRecommendationsResponse(
+        project_id=project_id,
+        target_duration=float(project["target_duration"]),
+        audio_duration=float(analysis["duration"]),
+        candidates=candidates,
+    )
+
+
+@app.post(
+    "/projects/{project_id}/segments/confirm",
+    response_model=SegmentConfirmationResponse,
+)
+def confirm_project_segment(
+    project_id: UUID,
+    payload: SegmentConfirmRequest,
+) -> SegmentConfirmationResponse:
+    project = get_project_record(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    audio = get_latest_audio(project_id)
+    analysis_asset = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "audio_analysis")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not audio or not analysis_asset:
+        raise HTTPException(
+            status_code=409,
+            detail="Analyze audio before selecting a segment",
+        )
+    try:
+        segment = validate_confirmed_segment(
+            start=payload.start,
+            end=payload.end,
+            category=payload.category,
+            label=payload.label,
+            target_duration=float(project["target_duration"]),
+            audio_duration=float(analysis_asset["payload"]["duration"]),
+            audio_id=str(audio["id"]),
+            audio_analysis_asset_id=int(analysis_asset["id"]),
+        )
+    except SegmentSelectionError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    snapshot = get_active_asset_snapshot(project_id, exclude_kind="segment")
+    asset = insert_asset_version(
+        project_id,
+        "segment",
+        segment.model_dump(mode="json"),
+        activate=True,
+        provider="user",
+        model="manual-confirmation",
+        input_snapshot={"audio_analysis": snapshot["audio_analysis"]},
+    )
+    return SegmentConfirmationResponse(
         asset=AssetVersion.model_validate(asset),
         warnings=get_asset_dependency_warnings(project_id),
     )

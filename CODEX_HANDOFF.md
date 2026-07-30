@@ -221,3 +221,37 @@ docker compose up --build
   - API 重复分析命中缓存且 asset_id/version 不变
   - 热态完整后端测试约 4 秒；首次 librosa/Numba 初始化与两首夹具分析小于 30 秒
 - 下一任务：`V11-T007`，实现 30 秒片段推荐、用户确认与后续上下文锁定。
+
+### V11-T007：30 秒片段推荐与确认
+
+- 状态：完成
+- 推荐策略：
+  - 高潮候选：目标窗口平均能量最高
+  - 叙事转折候选：首尾变化与窗口动态最大
+  - 平稳候选：窗口能量方差最低
+  - 每个候选返回 start、end、duration、score 与可解释 reason
+- 确认与版本：
+  - 新增 `GET /projects/{project_id}/segments/recommendations`
+  - 新增 `POST /projects/{project_id}/segments/confirm`
+  - 服务端强制 `end-start == target_duration`，并校验 0 到音频总长边界
+  - 用户确认结果保存为版本化 `segment` 资产，切换片段不覆盖旧版本
+  - World/Character/Story/Shots 在没有确认片段时返回 409
+  - 下游生成的 `input_snapshot` 自动记录 segment asset_id/version
+  - 切换片段后资产 API 与确认响应返回需要重新生成的下游依赖警告
+- 上下文：
+  - 后续生成只收到确认区间内的 energy curve、beats、onsets 和 peaks
+  - 片段内时间统一换算为相对 0–30 秒，同时保留 source_duration 与 source_time
+  - 不再把整首歌固定曲线直接传给导演生成
+- 前端：
+  - 音频分析完成后展示真实能量曲线和选区
+  - 展示三类推荐卡，支持分别拖动“片段起点”和“片段终点”
+  - 两个手柄保持固定 30 秒，当前起止值实时可见
+  - 用户必须点击“确认这个 30 秒片段”，服务端校验成功后才进入导演页面
+- 验证结果：
+  - 后端 18/18 测试 PASS
+  - 推荐三分类、任意合法 30 秒区间、短音频、越界与错误时长测试 PASS
+  - 生成资产记录 segment 版本 PASS
+  - 切换片段后 World 依赖失效警告 PASS
+  - 生成上下文只保留确认片段曲线 PASS
+  - Next/Vinext 构建、TypeScript 与 ESLint PASS
+- 下一任务：`V11-T008`，实现真实 Director LLM Adapter、结构化输出与 Demo 自动降级。

@@ -64,6 +64,23 @@ export type AssetVersionsResponse = {
   warnings: AssetDependencyWarning[];
 };
 
+export type SegmentCandidate = {
+  category: "highlight" | "turn" | "stable";
+  label: string;
+  start: number;
+  end: number;
+  duration: number;
+  score: number;
+  reason: string;
+};
+
+export type SegmentRecommendationsResponse = {
+  project_id: string;
+  target_duration: number;
+  audio_duration: number;
+  candidates: SegmentCandidate[];
+};
+
 export type UploadResponse = {
   project_id: string;
   audio_id: string;
@@ -137,6 +154,22 @@ export function uploadAudio(projectId: string, file: File): Promise<UploadRespon
   return request<UploadResponse>("/audio/upload", { method: "POST", body: form });
 }
 
+export function analyzeAudio(projectId: string): Promise<{
+  project_id: string;
+  kind: "audio_analysis";
+  payload: Record<string, unknown>;
+  asset_id: number;
+  version: number;
+  status: string;
+  is_active: boolean;
+}> {
+  return request("/audio/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
 export function fetchProject(projectId: string): Promise<ProjectSnapshot> {
   return request<ProjectSnapshot>(`/projects/${encodeURIComponent(projectId)}`);
 }
@@ -179,6 +212,33 @@ export function activateAssetVersion(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(selector),
+    },
+  );
+}
+
+export function fetchSegmentRecommendations(
+  projectId: string,
+): Promise<SegmentRecommendationsResponse> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/segments/recommendations`,
+  );
+}
+
+export function confirmSegment(
+  projectId: string,
+  values: {
+    start: number;
+    end: number;
+    category: SegmentCandidate["category"] | "custom";
+    label: string;
+  },
+): Promise<{ asset: AssetVersion; warnings: AssetDependencyWarning[] }> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/segments/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
     },
   );
 }
