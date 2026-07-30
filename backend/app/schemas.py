@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -7,6 +8,11 @@ from pydantic import BaseModel, Field
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     target_duration: int = Field(default=30, ge=10, le=180)
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    target_duration: int | None = Field(default=None, ge=10, le=180)
 
 
 class ProjectRef(BaseModel):
@@ -33,6 +39,8 @@ class ProjectResponse(BaseModel):
     name: str
     target_duration: int
     status: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class UploadResponse(BaseModel):
@@ -52,3 +60,8 @@ class AudioSummary(BaseModel):
 
 class ProjectSnapshot(ProjectResponse):
     audio: AudioSummary | None = None
+
+
+class ProjectListResponse(BaseModel):
+    items: list[ProjectSnapshot]
+    total: int

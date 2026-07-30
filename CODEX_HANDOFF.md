@@ -113,3 +113,35 @@ docker compose up --build
 - 当前公开前端是由 vinext 生产构建预渲染得到的静态 Vercel 部署；Sites 工作区禁止公开发布，因此 Sites 版本继续保留为登录访问。
 - 已知风险：Vercel 实例重启或请求落到其他实例时，临时数据可能不可见；严禁把它视为正式用户数据存储。
 - 下一任务：`V11-T003`，接入正式数据库与对象存储，完成项目列表、详情、编辑、删除、自动保存和跨设备持久化。
+
+### V11-T003：项目列表、详情与持久化恢复
+
+- 状态：完成
+- 生产数据库：Vercel Marketplace Neon PostgreSQL（新加坡区域，免费方案）
+- 生产媒体存储：私有 Vercel Blob（香港区域）
+- 数据库迁移：应用启动时以幂等 DDL 创建 `projects`、`audio_assets`、`generated_assets`、`render_jobs`；外键使用 `ON DELETE CASCADE`。
+- API 变更：
+  - 新增 `GET /projects`
+  - 新增 `GET /projects/{project_id}`
+  - 新增 `PATCH /projects/{project_id}`
+  - 新增 `DELETE /projects/{project_id}`
+  - 保留 `GET /project/{project_id}` 兼容 T002 链路
+  - `GET /health` 新增 `media_storage`
+- 前端变更：
+  - 新增云端项目列表、最近更新时间和音频摘要
+  - 支持按 `project_id` 打开项目
+  - 项目名称 700ms 防抖自动保存
+  - 删除前二次确认，删除后清理当前 URL 与页面状态
+- 验证结果：
+  - `npm test`：PASS（2/2）
+  - `npm run lint`：PASS
+  - `python -m unittest discover -s backend/tests -v`：PASS（5/5）
+  - 真实 Neon + Blob：创建两个项目、上传音频、改名、列表、详情回读、删除 PASS
+  - 生产 API：`storage=postgres`、`durable_storage=true`、`media_storage=vercel_blob`
+  - 生产 API：创建两个项目、PATCH 改名、GET 列表、独立 GET 回读、DELETE 清理 PASS
+- 安全与清理：
+  - 本地媒体路径执行存储根目录边界校验，禁止目录穿越
+  - 删除项目时级联清理数据库关联记录和媒体对象
+  - Blob 与数据库凭据仅由 Vercel 环境注入，未提交到仓库
+- 已知限制：生产音频上传仍受 Vercel Function 请求体限制；大文件直传将在后续音频管线任务中处理。
+- 下一任务：`V11-T004`，实现资产版本管理、唯一激活版本和回滚依赖警告。

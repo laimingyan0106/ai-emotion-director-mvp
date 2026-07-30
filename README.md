@@ -27,6 +27,10 @@ docker compose up --build
 
 - `GET /health`
 - `GET /project/{project_id}`
+- `GET /projects`
+- `GET /projects/{project_id}`
+- `PATCH /projects/{project_id}`
+- `DELETE /projects/{project_id}`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -42,7 +46,8 @@ docker compose up --build
 - Sites 版本（工作区登录访问）：`https://ai-emotion-director-0729.nonkxybee.chatgpt.site`
 - 公开 FastAPI：`https://ai-emotion-director-api.vercel.app`
 - 前端通过 `NEXT_PUBLIC_API_BASE_URL` 选择真实 API；未配置时自动进入完整 Demo 模式。
-- 当前托管 API 使用临时 SQLite 和 `/tmp` 媒体目录，仅用于 V11-T002 联调。跨实例、跨设备持久化将在 V11-T003 接入正式数据库与对象存储。
+- 当前托管 API 使用 Neon PostgreSQL 与私有 Vercel Blob；项目、音频元数据和关联资产可跨请求、跨设备恢复。
+- 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 
 开发设计与验收说明见 `docs/plans/2026-07-29-ai-emotion-director-design.md`。

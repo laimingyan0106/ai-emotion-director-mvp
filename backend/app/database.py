@@ -122,7 +122,7 @@ class SqliteDatabase:
                 );
                 CREATE TABLE IF NOT EXISTS audio_assets (
                   id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
+                  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                   filename TEXT NOT NULL,
                   storage_path TEXT NOT NULL,
                   content_type TEXT,
@@ -132,7 +132,7 @@ class SqliteDatabase:
                 );
                 CREATE TABLE IF NOT EXISTS generated_assets (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  project_id TEXT NOT NULL,
+                  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                   kind TEXT NOT NULL,
                   payload TEXT NOT NULL,
                   version INTEGER NOT NULL DEFAULT 1,
@@ -140,7 +140,7 @@ class SqliteDatabase:
                 );
                 CREATE TABLE IF NOT EXISTS render_jobs (
                   id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
+                  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                   adapter TEXT NOT NULL,
                   status TEXT NOT NULL,
                   payload TEXT NOT NULL,
@@ -157,6 +157,7 @@ class SqliteDatabase:
     def connection(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
         finally:
@@ -196,6 +197,117 @@ def create_project_record(project_id: UUID, name: str, target_duration: int) -> 
                 (project_id, name, target_duration),
             )
         connection.commit()
+
+
+def list_project_records() -> list[dict[str, Any]]:
+    with database.connection() as connection:
+        if isinstance(database, SqliteDatabase):
+            rows = connection.execute(
+                """
+                SELECT * FROM projects
+                ORDER BY updated_at DESC, created_at DESC
+                """
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT * FROM projects
+                ORDER BY updated_at DESC, created_at DESC
+                """
+            ).fetchall()
+    return [_normalize_project(dict(row)) for row in rows]
+
+
+def update_project_record(
+    project_id: UUID,
+    *,
+    name: str | None = None,
+    target_duration: int | None = None,
+) -> dict[str, Any] | None:
+    updates: list[tuple[str, Any]] = []
+    if name is not None:
+        updates.append(("name", name))
+    if target_duration is not None:
+        updates.append(("target_duration", target_duration))
+    if not updates:
+        return get_project_record(project_id)
+
+    with database.connection() as connection:
+        if isinstance(database, SqliteDatabase):
+            assignments = ", ".join(f"{column} = ?" for column, _ in updates)
+            values = [value for _, value in updates]
+            cursor = connection.execute(
+                f"""
+                UPDATE projects SET {assignments}, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (*values, str(project_id)),
+            )
+        else:
+            assignments = ", ".join(f"{column} = %s" for column, _ in updates)
+            values = [value for _, value in updates]
+            cursor = connection.execute(
+                f"""
+                UPDATE projects SET {assignments}, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (*values, project_id),
+            )
+        connection.commit()
+        if cursor.rowcount == 0:
+            return None
+    return get_project_record(project_id)
+
+
+def delete_project_record(project_id: UUID) -> list[str] | None:
+    with database.connection() as connection:
+        project_query = "SELECT id FROM projects WHERE id = ?" if isinstance(database, SqliteDatabase) else "SELECT id FROM projects WHERE id = %s"
+        project = connection.execute(project_query, (str(project_id),) if isinstance(database, SqliteDatabase) else (project_id,)).fetchone()
+        if not project:
+            return None
+
+        audio_query = (
+            "SELECT storage_path FROM audio_assets WHERE project_id = ?"
+            if isinstance(database, SqliteDatabase)
+            else "SELECT storage_path FROM audio_assets WHERE project_id = %s"
+        )
+        audio_rows = connection.execute(
+            audio_query,
+            (str(project_id),) if isinstance(database, SqliteDatabase) else (project_id,),
+        ).fetchall()
+        storage_paths = [str(row["storage_path"]) for row in audio_rows]
+
+        if isinstance(database, SqliteDatabase):
+            for table in ("render_jobs", "generated_assets", "audio_assets"):
+                connection.execute(f"DELETE FROM {table} WHERE project_id = ?", (str(project_id),))
+            connection.execute("DELETE FROM projects WHERE id = ?", (str(project_id),))
+        else:
+            connection.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+        connection.commit()
+    return storage_paths
+
+
+def count_project_dependents(project_id: UUID) -> dict[str, int]:
+    result: dict[str, int] = {}
+    with database.connection() as connection:
+        for table in ("audio_assets", "generated_assets", "render_jobs"):
+            if isinstance(database, SqliteDatabase):
+                row = connection.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE project_id = ?",
+                    (str(project_id),),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE project_id = %s",
+                    (project_id,),
+                ).fetchone()
+            result[table] = int(row["count"])
+    return result
+
+
+def _normalize_project(result: dict[str, Any]) -> dict[str, Any]:
+    result["id"] = UUID(str(result["id"]))
+    return result
 
 
 def save_audio_record(
@@ -248,8 +360,7 @@ def get_project_record(project_id: UUID) -> dict[str, Any] | None:
             ).fetchone()
     if not project:
         return None
-    result = dict(project)
-    result["id"] = UUID(str(result["id"]))
+    result = _normalize_project(dict(project))
     if audio:
         audio_result = dict(audio)
         audio_result["id"] = UUID(str(audio_result["id"]))

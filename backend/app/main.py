@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -9,19 +10,35 @@ from .config import get_settings
 from .database import (
     create_project_record,
     create_render_job,
+    delete_project_record,
     database,
     get_latest_audio,
     get_project_record,
+    list_project_records,
     load_project_context,
     save_audio_analysis,
     save_audio_record,
+    update_project_record,
 )
-from .schemas import CharacterRequest, PipelineAsset, ProjectCreate, ProjectRef, ProjectResponse, ProjectSnapshot, RenderRequest, UploadResponse
+from .schemas import (
+    CharacterRequest,
+    PipelineAsset,
+    ProjectCreate,
+    ProjectListResponse,
+    ProjectRef,
+    ProjectResponse,
+    ProjectSnapshot,
+    ProjectUpdate,
+    RenderRequest,
+    UploadResponse,
+)
 from .services.adapters import get_director_adapter
 from .services.audio import probe_audio
+from .services.storage import get_media_storage
 
 settings = get_settings()
 adapter = get_director_adapter()
+media_storage = get_media_storage()
 
 
 @asynccontextmanager
@@ -50,6 +67,7 @@ def health() -> dict[str, str | bool]:
         "adapter": settings.adapter_mode,
         "storage": settings.resolved_storage_mode,
         "durable_storage": settings.resolved_storage_mode == "postgres",
+        "media_storage": settings.resolved_media_storage_mode,
     }
 
 
@@ -68,6 +86,41 @@ def get_project(project_id: UUID) -> ProjectSnapshot:
     return ProjectSnapshot.model_validate(project)
 
 
+@app.get("/projects", response_model=ProjectListResponse)
+def list_projects() -> ProjectListResponse:
+    items = [
+        ProjectSnapshot.model_validate(get_project_record(project["id"]) or project)
+        for project in list_project_records()
+    ]
+    return ProjectListResponse(items=items, total=len(items))
+
+
+@app.get("/projects/{project_id}", response_model=ProjectSnapshot)
+def get_project_detail(project_id: UUID) -> ProjectSnapshot:
+    return get_project(project_id)
+
+
+@app.patch("/projects/{project_id}", response_model=ProjectSnapshot)
+def update_project(project_id: UUID, payload: ProjectUpdate) -> ProjectSnapshot:
+    project = update_project_record(
+        project_id,
+        name=payload.name,
+        target_duration=payload.target_duration,
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectSnapshot.model_validate(project)
+
+
+@app.delete("/projects/{project_id}", status_code=204)
+async def delete_project(project_id: UUID) -> None:
+    storage_paths = delete_project_record(project_id)
+    if storage_paths is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    for storage_path in storage_paths:
+        await media_storage.delete(storage_path)
+
+
 @app.post("/audio/upload", response_model=UploadResponse, status_code=201)
 async def upload_audio(project_id: UUID = Form(...), audio: UploadFile = File(...)) -> UploadResponse:
     allowed = {"audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/flac"}
@@ -77,18 +130,18 @@ async def upload_audio(project_id: UUID = Form(...), audio: UploadFile = File(..
     extension = Path(audio.filename or "audio.bin").suffix.lower()
     if not get_project_record(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
-    target = settings.resolved_media_root / str(project_id) / f"{audio_id}{extension}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    size = 0
-    with target.open("wb") as output:
-        while chunk := await audio.read(1024 * 1024):
-            size += len(chunk)
-            if size > 200 * 1024 * 1024:
-                target.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="Audio exceeds 200MB")
-            output.write(chunk)
-    save_audio_record(audio_id, project_id, audio.filename or target.name, str(target), audio.content_type, size)
-    return UploadResponse(project_id=project_id, audio_id=audio_id, filename=audio.filename or target.name, size=size, status="uploaded")
+    data = await audio.read(200 * 1024 * 1024 + 1)
+    size = len(data)
+    if size > 200 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio exceeds 200MB")
+    pathname = f"projects/{project_id}/audio/{audio_id}{extension}"
+    storage_path = await media_storage.put(
+        pathname,
+        BytesIO(data),
+        content_type=audio.content_type,
+    )
+    save_audio_record(audio_id, project_id, audio.filename or f"{audio_id}{extension}", storage_path, audio.content_type, size)
+    return UploadResponse(project_id=project_id, audio_id=audio_id, filename=audio.filename or f"{audio_id}{extension}", size=size, status="uploaded")
 
 
 @app.post("/audio/analyze", response_model=PipelineAsset)

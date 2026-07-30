@@ -12,6 +12,8 @@ export type ProjectResponse = {
   name: string;
   target_duration: number;
   status: string;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
 export type ProjectSnapshot = ProjectResponse & {
@@ -21,6 +23,11 @@ export type ProjectSnapshot = ProjectResponse & {
     content_type: string | null;
     size_bytes: number;
   } | null;
+};
+
+export type ProjectListResponse = {
+  items: ProjectSnapshot[];
+  total: number;
 };
 
 export type UploadResponse = {
@@ -71,6 +78,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(`导演 API 请求失败：${detail}`, response.status);
   }
 
+  if (response.status === 204) {
+    return undefined as T;
+  }
   return (await response.json()) as T;
 }
 
@@ -94,5 +104,26 @@ export function uploadAudio(projectId: string, file: File): Promise<UploadRespon
 }
 
 export function fetchProject(projectId: string): Promise<ProjectSnapshot> {
-  return request<ProjectSnapshot>(`/project/${encodeURIComponent(projectId)}`);
+  return request<ProjectSnapshot>(`/projects/${encodeURIComponent(projectId)}`);
+}
+
+export function fetchProjects(): Promise<ProjectListResponse> {
+  return request<ProjectListResponse>("/projects");
+}
+
+export function updateProject(
+  projectId: string,
+  values: { name?: string; target_duration?: number },
+): Promise<ProjectSnapshot> {
+  return request<ProjectSnapshot>(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}
+
+export function deleteProject(projectId: string): Promise<void> {
+  return request<void>(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  });
 }

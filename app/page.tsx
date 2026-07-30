@@ -5,8 +5,12 @@ import {
   ApiError,
   checkHealth,
   createProject,
+  deleteProject,
   fetchProject,
+  fetchProjects,
   getApiMode,
+  ProjectSnapshot,
+  updateProject,
   uploadAudio,
 } from "../lib/api-client";
 
@@ -185,15 +189,22 @@ export default function Home() {
   const [apiError, setApiError] = useState("");
   const [apiProjectId, setApiProjectId] = useState("");
   const [remoteAudio, setRemoteAudio] = useState<{ filename: string; size_bytes: number } | null>(null);
+  const [projects, setProjects] = useState<ProjectSnapshot[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(getApiMode() === "real");
+  const [savingProject, setSavingProject] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const lastSavedName = useRef(projectName);
 
   useEffect(() => {
     if (getApiMode() === "demo") return;
     const projectId = new URLSearchParams(window.location.search).get("project_id");
     const connect = async () => {
       try {
+        const projectList = await fetchProjects();
+        setProjects(projectList.items);
         if (projectId) {
           const project = await fetchProject(projectId);
+          lastSavedName.current = project.name;
           setProjectName(project.name);
           setApiProjectId(project.id);
           setRemoteAudio(project.audio);
@@ -209,10 +220,30 @@ export default function Home() {
       } catch (error) {
         setConnection("error");
         setApiError(error instanceof ApiError ? error.message : "导演 API 暂时不可用。");
+      } finally {
+        setProjectsLoading(false);
       }
     };
     void connect();
   }, []);
+
+  useEffect(() => {
+    if (!apiProjectId || projectName === lastSavedName.current || getApiMode() === "demo") return;
+    const timer = window.setTimeout(async () => {
+      setSavingProject(true);
+      try {
+        const updated = await updateProject(apiProjectId, { name: projectName });
+        lastSavedName.current = updated.name;
+        setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setApiError("");
+      } catch (error) {
+        setApiError(error instanceof ApiError ? error.message : "项目自动保存失败。");
+      } finally {
+        setSavingProject(false);
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [apiProjectId, projectName]);
 
   const completedStage = Math.min(stages.length, Math.floor((progress / 100) * stages.length));
   const statusText = stage === "idle" ? "等待素材" : stage === "analyzing" ? `导演处理中 ${progress}%` : stage === "rendering" ? "渲染中" : "方案已生成";
@@ -263,6 +294,50 @@ export default function Home() {
     }, 160);
   }
 
+  async function openRemoteProject(projectId: string) {
+    setApiError("");
+    try {
+      const project = await fetchProject(projectId);
+      lastSavedName.current = project.name;
+      setProjectName(project.name);
+      setApiProjectId(project.id);
+      setRemoteAudio(project.audio);
+      setFile(null);
+      setStage(project.audio ? "ready" : "idle");
+      setProgress(project.audio ? 100 : 0);
+      const url = new URL(window.location.href);
+      url.searchParams.set("project_id", project.id);
+      window.history.replaceState({}, "", url);
+      showToast("项目已从云端恢复");
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "项目加载失败。");
+    }
+  }
+
+  async function removeRemoteProject(project: ProjectSnapshot) {
+    if (!window.confirm(`确认删除“${project.name}”？关联音频和导演资产也会一并删除。`)) return;
+    setApiError("");
+    try {
+      await deleteProject(project.id);
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+      if (apiProjectId === project.id) {
+        setApiProjectId("");
+        setRemoteAudio(null);
+        setFile(null);
+        setProjectName("未命名导演项目");
+        lastSavedName.current = "未命名导演项目";
+        setStage("idle");
+        setProgress(0);
+        const url = new URL(window.location.href);
+        url.searchParams.delete("project_id");
+        window.history.replaceState({}, "", url);
+      }
+      showToast("项目及关联资产已删除");
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "项目删除失败。");
+    }
+  }
+
   async function generate() {
     if (!file) {
       showToast("先上传一首歌，或载入示例工程");
@@ -282,8 +357,11 @@ export default function Home() {
       const uploaded = await uploadAudio(project.id, file);
       setProgress(68);
       setApiProjectId(project.id);
+      lastSavedName.current = project.name;
       setRemoteAudio({ filename: uploaded.filename, size_bytes: uploaded.size });
       setConnection("real");
+      const saved = await fetchProject(project.id);
+      setProjects((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       const url = new URL(window.location.href);
       url.searchParams.set("project_id", project.id);
       window.history.replaceState({}, "", url);
@@ -445,6 +523,52 @@ export default function Home() {
                 ))}
               </div>
             </section>
+
+            {getApiMode() === "real" && (
+              <section className="project-library panel" aria-label="云端项目列表">
+                <div className="project-library-head">
+                  <div className="panel-title">
+                    <span>PROJECT LIBRARY</span>
+                    <strong>云端导演工程</strong>
+                  </div>
+                  {apiProjectId && (
+                    <label className="project-name-editor">
+                      <span>{savingProject ? "自动保存中…" : "项目名称 · 已自动保存"}</span>
+                      <input
+                        value={projectName}
+                        onChange={(event) => setProjectName(event.target.value)}
+                        maxLength={120}
+                        aria-label="项目名称"
+                      />
+                    </label>
+                  )}
+                </div>
+                {projectsLoading ? (
+                  <p className="project-empty">正在读取云端项目…</p>
+                ) : projects.length === 0 ? (
+                  <p className="project-empty">还没有云端项目。上传一首歌曲即可创建。</p>
+                ) : (
+                  <div className="project-list">
+                    {projects.map((project) => (
+                      <article className={project.id === apiProjectId ? "project-row active" : "project-row"} key={project.id}>
+                        <button onClick={() => void openRemoteProject(project.id)}>
+                          <strong>{project.name}</strong>
+                          <span>{project.audio?.filename || "尚未上传音频"}</span>
+                          <small>更新于 {project.updated_at ? new Date(project.updated_at).toLocaleString("zh-CN") : "刚刚"}</small>
+                        </button>
+                        <button
+                          className="project-delete"
+                          aria-label={`删除项目 ${project.name}`}
+                          onClick={() => void removeRemoteProject(project)}
+                        >
+                          删除
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
           </div>
         )}
 
