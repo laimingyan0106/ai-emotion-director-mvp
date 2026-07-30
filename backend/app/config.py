@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     audio_analysis_timeout_seconds: int = Field(default=45, ge=5, le=300)
     audio_analysis_max_seconds: int = Field(default=600, ge=30, le=3600)
     llm_api_key: str | None = None
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-5.6-terra"
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_timeout_seconds: int = Field(default=60, ge=5, le=300)
+    llm_http_retries: int = Field(default=2, ge=0, le=5)
     image_api_key: str | None = None
     video_api_key: str | None = None
 
@@ -54,6 +59,10 @@ class Settings(BaseSettings):
         if os.getenv("VERCEL") and self.sqlite_path == Path("./.data/emotion-director.db"):
             return Path("/tmp/emotion-director.db")
         return self.sqlite_path
+
+    @property
+    def resolved_llm_api_key(self) -> str | None:
+        return self.llm_api_key or os.getenv("OPENAI_API_KEY")
 
 
 @lru_cache

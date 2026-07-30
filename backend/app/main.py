@@ -49,6 +49,7 @@ from .schemas import (
 from .services.adapters import get_director_adapter
 from .services.audio import analyze_audio_file, demo_analysis
 from .services.generation import AssetGenerationError, generate_validated_asset
+from .services.providers import ProviderRequestError
 from .services.segments import (
     SegmentSelectionError,
     recommend_segments,
@@ -82,10 +83,13 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health() -> dict[str, str | bool]:
+def health() -> dict[str, str | bool | None]:
     return {
         "status": "ok",
-        "adapter": settings.adapter_mode,
+        "adapter": adapter.provider_name,
+        "adapter_configured": settings.adapter_mode,
+        "adapter_fallback_reason": adapter.fallback_reason,
+        "director_model": adapter.model_name,
         "storage": settings.resolved_storage_mode,
         "durable_storage": settings.resolved_storage_mode == "postgres",
         "media_storage": settings.resolved_media_storage_mode,
@@ -254,6 +258,7 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
     except SegmentSelectionError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     input_snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
+    prompt = adapter.build_prompt(kind, context)
     try:
         generation = generate_validated_asset(
             adapter,
@@ -267,8 +272,9 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
             kind,
             error.last_payload,
             activate=False,
-            provider=settings.adapter_mode,
-            model=adapter.__class__.__name__,
+            provider=adapter.provider_name,
+            model=adapter.model_name,
+            prompt=prompt,
             input_snapshot=input_snapshot,
             validation_errors=error.validation_errors,
         )
@@ -279,14 +285,46 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
                 "validation_errors": error.validation_errors,
             },
         ) from error
+    except ProviderRequestError as error:
+        validation_errors = [
+            {
+                "attempt": 1,
+                "location": [],
+                "type": error.__class__.__name__,
+                "message": str(error),
+                "status_code": error.status_code,
+                "retryable": error.retryable,
+            }
+        ]
+        insert_asset_version(
+            project_id,
+            kind,
+            {},
+            activate=False,
+            provider=adapter.provider_name,
+            model=adapter.model_name,
+            prompt=prompt,
+            input_snapshot=input_snapshot,
+            validation_errors=validation_errors,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Director provider request failed",
+                "provider": adapter.provider_name,
+                "model": adapter.model_name,
+                "errors": validation_errors,
+            },
+        ) from error
     result = generation.model.model_dump(mode="json")
     asset = insert_asset_version(
         project_id,
         kind,
         result,
         activate=True,
-        provider=settings.adapter_mode,
-        model=adapter.__class__.__name__,
+        provider=adapter.provider_name,
+        model=adapter.model_name,
+        prompt=prompt,
         input_snapshot=input_snapshot,
         validation_errors=generation.validation_errors,
     )

@@ -1,11 +1,27 @@
 from abc import ABC, abstractmethod
+import json
 from typing import Any
+
+from ..config import Settings, get_settings
+from ..domain import DOMAIN_MODELS
+from .providers import OpenAIResponsesClient
 
 
 class DirectorAdapter(ABC):
+    provider_name = "unknown"
+    model_name = "unknown"
+    fallback_reason: str | None = None
+
     @abstractmethod
     def generate(self, task: str, context: dict[str, Any]) -> Any:
         raise NotImplementedError
+
+    def build_prompt(self, task: str, context: dict[str, Any]) -> str:
+        return (
+            f"Generate the {task} asset for this confirmed directing context. "
+            "Return only data that satisfies the supplied schema.\n"
+            f"CONTEXT:\n{json.dumps(context, ensure_ascii=False, default=str)}"
+        )
 
     def repair(
         self,
@@ -20,6 +36,12 @@ class DirectorAdapter(ABC):
 
 class DemoDirectorAdapter(DirectorAdapter):
     """Deterministic fallback used until provider credentials are configured."""
+
+    provider_name = "demo"
+    model_name = "deterministic-v1"
+
+    def __init__(self, *, fallback_reason: str | None = None) -> None:
+        self.fallback_reason = fallback_reason
 
     def generate(self, task: str, context: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -100,5 +122,81 @@ class DemoDirectorAdapter(DirectorAdapter):
         return {"duration": 30, "fps": 24, "aspect_ratio": "16:9", "shots": shots}
 
 
-def get_director_adapter() -> DirectorAdapter:
-    return DemoDirectorAdapter()
+class ProviderDirectorAdapter(DirectorAdapter):
+    def __init__(
+        self,
+        *,
+        client: OpenAIResponsesClient,
+        model: str,
+    ) -> None:
+        self.client = client
+        self.provider_name = client.provider_name
+        self.model_name = model
+        self.fallback_reason = None
+
+    @property
+    def instructions(self) -> str:
+        return (
+            "You are the Director Engine for a music-video preproduction system. "
+            "Use only the confirmed segment and active upstream assets in context. "
+            "Preserve all IDs and references exactly. Do not invent references to "
+            "characters or assets absent from context. Return concise production-ready "
+            "Chinese creative content and obey the JSON schema exactly."
+        )
+
+    def generate(self, task: str, context: dict[str, Any]) -> Any:
+        return self.client.create_structured(
+            model=self.model_name,
+            instructions=self.instructions,
+            prompt=self.build_prompt(task, context),
+            schema_name=f"emotion_director_{task}",
+            schema=DOMAIN_MODELS[task].model_json_schema(),
+        )
+
+    def repair(
+        self,
+        task: str,
+        invalid_output: Any,
+        validation_errors: list[dict[str, Any]],
+        context: dict[str, Any],
+    ) -> Any:
+        repair_prompt = (
+            f"{self.build_prompt(task, context)}\n"
+            "The previous output failed validation. Repair every listed error without "
+            "changing valid upstream IDs or the confirmed segment.\n"
+            f"VALIDATION_ERRORS:\n{json.dumps(validation_errors, ensure_ascii=False)}\n"
+            f"INVALID_OUTPUT:\n{json.dumps(invalid_output, ensure_ascii=False, default=str)}"
+        )
+        return self.client.create_structured(
+            model=self.model_name,
+            instructions=self.instructions,
+            prompt=repair_prompt,
+            schema_name=f"emotion_director_{task}",
+            schema=DOMAIN_MODELS[task].model_json_schema(),
+        )
+
+
+def get_director_adapter(settings: Settings | None = None) -> DirectorAdapter:
+    resolved = settings or get_settings()
+    if resolved.adapter_mode == "demo":
+        return DemoDirectorAdapter()
+    if resolved.adapter_mode != "provider":
+        return DemoDirectorAdapter(
+            fallback_reason=f"unsupported_adapter_mode:{resolved.adapter_mode}",
+        )
+    api_key = resolved.resolved_llm_api_key
+    if not api_key:
+        return DemoDirectorAdapter(fallback_reason="missing_llm_api_key")
+    if resolved.llm_provider != "openai":
+        return DemoDirectorAdapter(
+            fallback_reason=f"unsupported_llm_provider:{resolved.llm_provider}",
+        )
+    return ProviderDirectorAdapter(
+        client=OpenAIResponsesClient(
+            api_key=api_key,
+            base_url=resolved.llm_base_url,
+            timeout_seconds=resolved.llm_timeout_seconds,
+            http_retries=resolved.llm_http_retries,
+        ),
+        model=resolved.llm_model,
+    )

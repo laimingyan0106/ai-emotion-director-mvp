@@ -255,3 +255,32 @@ docker compose up --build
   - 生成上下文只保留确认片段曲线 PASS
   - Next/Vinext 构建、TypeScript 与 ESLint PASS
 - 下一任务：`V11-T008`，实现真实 Director LLM Adapter、结构化输出与 Demo 自动降级。
+
+### V11-T008：真实 Director LLM Adapter
+
+- 状态：完成
+- Provider 架构：
+  - `DirectorAdapter` 保留抽象边界，业务层不绑定单一模型
+  - 新增 `ProviderDirectorAdapter` 与独立 `OpenAIResponsesClient`
+  - 使用 OpenAI Responses API 的 JSON Schema structured output
+  - 默认 `LLM_MODEL=gpt-5.6-terra`，可通过环境变量替换
+  - World/Character/Story/ShotSet Schema 由 V11-T005 Pydantic 模型直接生成
+- 配置与降级：
+  - `ADAPTER_MODE=demo|provider`
+  - 支持 `LLM_API_KEY` 或 `OPENAI_API_KEY`，密钥只存在运行环境，不写日志、prompt 或数据库
+  - `ADAPTER_MODE=provider` 但缺少密钥时，完整回落 `DemoDirectorAdapter`
+  - `/health` 分别返回 configured mode、actual adapter、model 与 fallback reason，避免把 Demo 伪装成真实 Provider
+- 稳定性：
+  - Provider 超时默认 60 秒
+  - 429 与 5xx 按 `LLM_HTTP_RETRIES` 有界指数退避，默认 2 次
+  - 4xx、网络错误、无 output text、畸形 JSON 均返回明确结构化错误
+  - Provider 失败写入 failed 资产版本，保存 provider/model/prompt/input_snapshot/error；不替换旧激活版本
+  - Provider 返回仍必须经过 V11-T005 领域 Schema 与 repair 重试
+- 验证结果：
+  - 后端 22/22 测试 PASS
+  - Mock Responses structured output 与 Schema 请求 PASS
+  - Mock 429 后有界重试 PASS
+  - 缺少密钥自动回落完整 Demo PASS
+  - Provider 最终失败返回 502、记录 failed 版本且旧 active 不变 PASS
+  - 未发现可用真实 API 密钥，因此没有执行付费真实 Provider smoke test；此边界已明确保留
+- 下一任务：`V11-T009`，扩展 World Bible v1.1 的视觉、声音、地点与负面约束体系。

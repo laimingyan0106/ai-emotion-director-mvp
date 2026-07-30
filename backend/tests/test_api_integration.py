@@ -30,11 +30,24 @@ from app.database import (  # noqa: E402
 from app.services.adapters import DirectorAdapter  # noqa: E402
 from app.services.audio import demo_analysis  # noqa: E402
 from app.services.segments import restrict_context_to_confirmed_segment  # noqa: E402
+from app.services.providers import ProviderRequestError  # noqa: E402
 
 
 class AlwaysMalformedAdapter(DirectorAdapter):
     def generate(self, task, context):
         return '{"wrong": true}'
+
+
+class FailingProviderAdapter(DirectorAdapter):
+    provider_name = "mock-provider"
+    model_name = "mock-model"
+
+    def generate(self, task, context):
+        raise ProviderRequestError(
+            "mock rate limit exhausted",
+            status_code=429,
+            retryable=True,
+        )
 
 
 def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
@@ -358,6 +371,41 @@ class ApiIntegrationTest(unittest.TestCase):
             failed = next(asset for asset in versions if asset["status"] == "failed")
             self.assertFalse(failed["is_active"])
             self.assertTrue(failed["validation_errors"])
+
+    def test_provider_failure_is_visible_and_preserves_active_version(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "Provider failure isolation"},
+            ).json()["id"]
+            seed_confirmed_segment(project_id)
+            active = client.post(
+                "/world/create",
+                json={"project_id": project_id},
+            ).json()
+
+            original_adapter = main_module.adapter
+            main_module.adapter = FailingProviderAdapter()
+            try:
+                response = client.post(
+                    "/world/create",
+                    json={"project_id": project_id},
+                )
+            finally:
+                main_module.adapter = original_adapter
+
+            self.assertEqual(response.status_code, 502)
+            self.assertEqual(response.json()["detail"]["provider"], "mock-provider")
+            versions = list_asset_versions(UUID(project_id), "world")
+            self.assertEqual(
+                next(asset for asset in versions if asset["is_active"])["id"],
+                active["asset_id"],
+            )
+            failed = next(asset for asset in versions if asset["status"] == "failed")
+            self.assertEqual(failed["provider"], "mock-provider")
+            self.assertEqual(failed["model"], "mock-model")
+            self.assertTrue(failed["prompt"])
+            self.assertEqual(failed["validation_errors"][0]["status_code"], 429)
 
     def test_segment_recommend_confirm_bounds_and_dependency_invalidation(self):
         with TestClient(app) as client:
