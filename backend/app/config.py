@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     llm_http_retries: int = Field(default=2, ge=0, le=5)
     image_api_key: str | None = None
     image_adapter_mode: str = "auto"
+    image_auth_style: str = "bearer"
     image_model: str = "gpt-image-2"
     image_base_url: str | None = None
     image_quality: str = "medium"

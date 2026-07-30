@@ -98,6 +98,7 @@ class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
         self.api_key = api_key
         self.model = settings.image_model
         self.base_url = settings.resolved_image_base_url
+        self.auth_style = settings.image_auth_style
         self.quality = settings.image_quality
         self.size = settings.image_size
         self.timeout = settings.image_timeout_seconds
@@ -111,7 +112,11 @@ class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
             response = await client.post(
                 f"{self.base_url}/images/generations",
                 headers={
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": (
+                        self.api_key
+                        if self.auth_style == "raw"
+                        else f"Bearer {self.api_key}"
+                    ),
                     "Content-Type": "application/json",
                 },
                 json={

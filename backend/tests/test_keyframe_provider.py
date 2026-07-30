@@ -95,6 +95,25 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
         result = await adapter.generate(shot_id="S01", prompt="frame")
         self.assertEqual(result.content, image)
 
+    async def test_relay_can_use_raw_authorization_header(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers["authorization"], "test-secret")
+            return httpx.Response(
+                200,
+                json={"data": [{"b64_json": base64.b64encode(b"png").decode()}]},
+            )
+
+        settings = Settings(
+            _env_file=None,
+            image_api_key="test-secret",
+            image_auth_style="raw",
+        )
+        adapter = OpenAIKeyframeImageAdapter(
+            settings,
+            transport=httpx.MockTransport(handler),
+        )
+        await adapter.generate(shot_id="S01", prompt="frame")
+
     def test_provider_mode_without_key_falls_back_explicitly(self):
         settings = Settings(
             _env_file=None,
