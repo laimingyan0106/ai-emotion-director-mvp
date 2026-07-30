@@ -1,6 +1,8 @@
+import asyncio
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
+import tempfile
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -42,7 +44,7 @@ from .schemas import (
     UploadResponse,
 )
 from .services.adapters import get_director_adapter
-from .services.audio import probe_audio
+from .services.audio import analyze_audio_file, demo_analysis
 from .services.generation import AssetGenerationError, generate_validated_asset
 from .services.storage import get_media_storage
 
@@ -155,11 +157,61 @@ async def upload_audio(project_id: UUID = Form(...), audio: UploadFile = File(..
 
 
 @app.post("/audio/analyze", response_model=PipelineAsset)
-def analyze_audio(payload: ProjectRef) -> PipelineAsset:
+async def analyze_audio(payload: ProjectRef) -> PipelineAsset:
     row = get_latest_audio(payload.project_id)
     if not row:
         raise HTTPException(status_code=404, detail="No audio uploaded for project")
-    analysis = probe_audio(Path(row["storage_path"]))
+    analysis = row.get("analysis")
+    active_analysis = next(
+        (
+            asset
+            for asset in list_asset_versions(payload.project_id, "audio_analysis")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if analysis and active_analysis and active_analysis["payload"] == analysis:
+        return PipelineAsset(
+            project_id=payload.project_id,
+            kind="audio_analysis",
+            payload=analysis,
+            asset_id=active_analysis["id"],
+            version=active_analysis["version"],
+            status=active_analysis["status"],
+            is_active=active_analysis["is_active"],
+        )
+    if analysis is None:
+        try:
+            audio_bytes = await media_storage.read(str(row["storage_path"]))
+            with tempfile.TemporaryDirectory(prefix="emotion-director-analysis-") as directory:
+                suffix = Path(str(row.get("filename") or "audio.bin")).suffix or ".bin"
+                analysis_path = Path(directory) / f"source{suffix}"
+                analysis_path.write_bytes(audio_bytes)
+                analysis = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        analyze_audio_file,
+                        analysis_path,
+                        max_duration_seconds=settings.audio_analysis_max_seconds,
+                        decode_timeout_seconds=min(
+                            settings.audio_analysis_timeout_seconds,
+                            30,
+                        ),
+                    ),
+                    timeout=settings.audio_analysis_timeout_seconds,
+                )
+        except TimeoutError:
+            analysis = demo_analysis(
+                degraded=True,
+                reason=(
+                    "analysis_timeout_"
+                    f"{settings.audio_analysis_timeout_seconds}s"
+                ),
+            )
+        except Exception as error:
+            analysis = demo_analysis(
+                degraded=True,
+                reason=f"media_read_or_analysis_failed:{error}",
+            )
     save_audio_analysis(row["id"], analysis)
     asset = insert_asset_version(
         payload.project_id,
@@ -167,8 +219,13 @@ def analyze_audio(payload: ProjectRef) -> PipelineAsset:
         analysis,
         activate=True,
         provider="local",
-        model="audio-probe",
-        input_snapshot={},
+        model=str(analysis.get("analysis_version", "audio-analysis")),
+        input_snapshot={
+            "audio": {
+                "audio_id": str(row["id"]),
+                "source_sha256": analysis.get("source_sha256"),
+            }
+        },
     )
     return PipelineAsset(
         project_id=payload.project_id,

@@ -1,6 +1,10 @@
 import os
 import tempfile
 import unittest
+import wave
+import math
+import struct
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import UUID
@@ -27,6 +31,23 @@ from app.services.adapters import DirectorAdapter  # noqa: E402
 class AlwaysMalformedAdapter(DirectorAdapter):
     def generate(self, task, context):
         return '{"wrong": true}'
+
+
+def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        frames = [
+            struct.pack(
+                "<h",
+                int(32767 * 0.35 * math.sin(2 * math.pi * 440 * index / sample_rate)),
+            )
+            for index in range(round(duration * sample_rate))
+        ]
+        output.writeframes(b"".join(frames))
+    return buffer.getvalue()
 
 
 class ApiIntegrationTest(unittest.TestCase):
@@ -70,6 +91,35 @@ class ApiIntegrationTest(unittest.TestCase):
             self.assertEqual(snapshot["name"], "T002 integration")
             self.assertEqual(snapshot["audio"]["filename"], "sample.wav")
             self.assertEqual(snapshot["audio"]["size_bytes"], len(b"RIFF-demo-audio"))
+
+    def test_audio_analysis_is_real_versioned_and_cached(self):
+        with TestClient(app) as client:
+            created = client.post(
+                "/project/create",
+                json={"name": "Audio cache"},
+            ).json()
+            project_id = created["id"]
+            audio_bytes = sine_wav_bytes()
+            uploaded = client.post(
+                "/audio/upload",
+                data={"project_id": project_id},
+                files={"audio": ("fixture.wav", audio_bytes, "audio/wav")},
+            )
+            self.assertEqual(uploaded.status_code, 201)
+
+            first = client.post(
+                "/audio/analyze",
+                json={"project_id": project_id},
+            )
+            second = client.post(
+                "/audio/analyze",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            self.assertFalse(first.json()["payload"]["degraded"])
+            self.assertEqual(first.json()["asset_id"], second.json()["asset_id"])
+            self.assertEqual(first.json()["version"], second.json()["version"])
 
     def test_project_crud_list_and_persistent_refetch(self):
         with TestClient(app) as client:

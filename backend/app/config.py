@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     sqlite_path: Path = Path("./.data/emotion-director.db")
     adapter_mode: str = "demo"
     generation_retry_attempts: int = Field(default=1, ge=0, le=3)
+    audio_analysis_timeout_seconds: int = Field(default=45, ge=5, le=300)
+    audio_analysis_max_seconds: int = Field(default=600, ge=30, le=3600)
     llm_api_key: str | None = None
     image_api_key: str | None = None
     video_api_key: str | None = None

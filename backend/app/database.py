@@ -513,15 +513,27 @@ def get_latest_audio(project_id: UUID) -> dict[str, Any] | None:
     with database.connection() as connection:
         if isinstance(database, SqliteDatabase):
             row = connection.execute(
-                "SELECT id, storage_path FROM audio_assets WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                """
+                SELECT id, storage_path, filename, analysis
+                FROM audio_assets
+                WHERE project_id = ? ORDER BY created_at DESC LIMIT 1
+                """,
                 (str(project_id),),
             ).fetchone()
         else:
             row = connection.execute(
-                "SELECT id, storage_path FROM audio_assets WHERE project_id = %s ORDER BY created_at DESC LIMIT 1",
+                """
+                SELECT id, storage_path, filename, analysis
+                FROM audio_assets
+                WHERE project_id = %s ORDER BY created_at DESC LIMIT 1
+                """,
                 (project_id,),
             ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    result["analysis"] = _decode_json(result.get("analysis"), None)
+    return result
 
 
 def save_audio_analysis(audio_id: UUID | str, analysis: dict[str, Any]) -> None:

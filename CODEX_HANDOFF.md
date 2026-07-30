@@ -197,3 +197,27 @@ docker compose up --build
   - extra 字段被拒绝 PASS
   - API 最终失败写入 failed 版本且不污染旧激活版本 PASS
 - 下一任务：`V11-T006`，实现 FFmpeg/librosa 真实音频特征分析并保留 Demo fallback。
+
+### V11-T006：真实音频特征分析管线
+
+- 状态：完成
+- 音频分析：
+  - 使用 librosa 提取 duration、BPM、beats、onsets、RMS、spectral centroid、chroma
+  - 生成 100 点归一化 `energy_curve`，识别静音段与最多 8 个能量峰值候选
+  - 输出 `source_sha256`、`analysis_version=librosa-v1` 与处理耗时，固定音频结果可重复
+  - MP3/M4A 等压缩格式优先使用系统 FFmpeg；缺失时使用 `imageio-ffmpeg` 的托管二进制解码
+  - 不把能量与频谱信号描述为心理学意义的情绪判断，`primary_emotion` 明确写为未进行该类识别
+- 执行与降级：
+  - Blob 私有音频通过鉴权读取后写入请求级临时目录分析
+  - DSP 在工作线程执行，`AUDIO_ANALYSIS_TIMEOUT_SECONDS` 默认 45 秒
+  - 最多分析 `AUDIO_ANALYSIS_MAX_SECONDS`（默认 600 秒），超长音频标记 `truncated`
+  - 缺少解码器、读取失败、解析失败或超时均返回 `degraded=true` 和 `degraded_reason`
+  - 分析结果同时缓存到 `audio_assets.analysis` 并写入版本化 `audio_analysis`；重复请求返回同一激活版本
+- 验证结果：
+  - 后端 16/16 测试 PASS
+  - 220Hz 稳态与 880Hz 脉冲固定夹具的哈希、频谱质心、能量曲线明显不同
+  - 同一夹具重复分析除处理耗时外结果逐字段一致
+  - 无 FFmpeg 的压缩音频降级原因可见
+  - API 重复分析命中缓存且 asset_id/version 不变
+  - 热态完整后端测试约 4 秒；首次 librosa/Numba 初始化与两首夹具分析小于 30 秒
+- 下一任务：`V11-T007`，实现 30 秒片段推荐、用户确认与后续上下文锁定。

@@ -25,6 +25,10 @@ class MediaStorage(ABC):
     async def delete(self, storage_path: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    async def read(self, storage_path: str) -> bytes:
+        raise NotImplementedError
+
 
 class LocalMediaStorage(MediaStorage):
     def __init__(self, root: Path) -> None:
@@ -61,6 +65,13 @@ class LocalMediaStorage(MediaStorage):
             except OSError:
                 break
             directory = directory.parent
+
+    async def read(self, storage_path: str) -> bytes:
+        root = self.root.resolve()
+        target = Path(storage_path).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("Media path escapes storage root")
+        return target.read_bytes()
 
 
 class VercelBlobMediaStorage(MediaStorage):
@@ -103,6 +114,15 @@ class VercelBlobMediaStorage(MediaStorage):
                 json={"urls": [storage_path]},
             )
             response.raise_for_status()
+
+    async def read(self, storage_path: str) -> bytes:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.get(
+                storage_path,
+                headers={"authorization": f"Bearer {self.token}"},
+            )
+            response.raise_for_status()
+        return response.content
 
 
 def get_media_storage() -> MediaStorage:
