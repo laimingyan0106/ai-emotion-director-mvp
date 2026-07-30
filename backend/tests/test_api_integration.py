@@ -3,7 +3,9 @@ import tempfile
 import unittest
 import wave
 import math
+import json
 import struct
+import zipfile
 from copy import deepcopy
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +36,7 @@ from app.services.character_references import (  # noqa: E402
     CharacterImageAdapter,
     GeneratedCharacterReference,
 )
+from app.services.keyframes import DemoKeyframeImageAdapter  # noqa: E402
 from app.services.segments import restrict_context_to_confirmed_segment  # noqa: E402
 from app.services.providers import ProviderRequestError  # noqa: E402
 
@@ -176,6 +179,144 @@ def seed_confirmed_segment(project_id: str, duration: float = 60.0):
 
 
 class ApiIntegrationTest(unittest.TestCase):
+    def test_keyframe_queue_partial_retry_confirmation_and_download_package(self):
+        original_adapter = main_module.keyframe_image_adapter
+        try:
+            with TestClient(app) as client:
+                project_id = client.post(
+                    "/project/create",
+                    json={"name": "Keyframe queue"},
+                ).json()["id"]
+                seed_confirmed_segment(project_id)
+                client.post("/world/create", json={"project_id": project_id})
+                client.post("/character/create", json={"project_id": project_id})
+                client.post("/story/create", json={"project_id": project_id})
+                shots = client.post(
+                    "/shots/create",
+                    json={"project_id": project_id},
+                ).json()
+
+                main_module.keyframe_image_adapter = DemoKeyframeImageAdapter(
+                    {"S04"}
+                )
+                started = client.post(
+                    f"/projects/{project_id}/keyframes/start",
+                    json={"expected_shots_version": shots["version"]},
+                )
+                self.assertEqual(started.status_code, 200)
+                first = started.json()
+                self.assertEqual(first["progress"]["total"], 10)
+                self.assertEqual(first["progress"]["succeeded"], 9)
+                self.assertEqual(first["progress"]["failed"], 1)
+                failed = next(
+                    task
+                    for task in first["asset"]["payload"]["tasks"]
+                    if task["shot_id"] == "S04"
+                )
+                self.assertEqual(failed["status"], "failed")
+                self.assertTrue(failed["provider_task_id"])
+                self.assertTrue(failed["error"])
+                self.assertTrue(
+                    any("S04" in warning for warning in first["consistency_warnings"])
+                )
+
+                main_module.keyframe_image_adapter = DemoKeyframeImageAdapter()
+                retried = client.post(
+                    f"/projects/{project_id}/keyframes/S04/retry",
+                    json={"expected_version": first["asset"]["version"]},
+                )
+                self.assertEqual(retried.status_code, 200)
+                second = retried.json()
+                self.assertEqual(second["progress"]["succeeded"], 10)
+                retried_task = next(
+                    task
+                    for task in second["asset"]["payload"]["tasks"]
+                    if task["shot_id"] == "S04"
+                )
+                self.assertEqual(retried_task["attempt"], 2)
+
+                s01_before = next(
+                    task
+                    for task in second["asset"]["payload"]["tasks"]
+                    if task["shot_id"] == "S01"
+                )
+                confirmed = client.patch(
+                    f"/projects/{project_id}/keyframes/S01",
+                    json={
+                        "expected_version": second["asset"]["version"],
+                        "confirmed": True,
+                    },
+                )
+                self.assertEqual(confirmed.status_code, 200)
+                third = confirmed.json()
+                self.assertEqual(third["progress"]["confirmed"], 1)
+                rejected_retry = client.post(
+                    f"/projects/{project_id}/keyframes/S01/retry",
+                    json={"expected_version": third["asset"]["version"]},
+                )
+                self.assertEqual(rejected_retry.status_code, 409)
+
+                regrouped = client.post(
+                    f"/projects/{project_id}/keyframes/start",
+                    json={"expected_shots_version": shots["version"]},
+                )
+                self.assertEqual(regrouped.status_code, 200)
+                s01_after = next(
+                    task
+                    for task in regrouped.json()["asset"]["payload"]["tasks"]
+                    if task["shot_id"] == "S01"
+                )
+                self.assertTrue(s01_after["confirmed"])
+                self.assertEqual(
+                    s01_after["provider_task_id"],
+                    s01_before["provider_task_id"],
+                )
+
+                image = client.get(
+                    f"/projects/{project_id}/keyframes/S04/image"
+                )
+                self.assertEqual(image.status_code, 200)
+                self.assertEqual(image.headers["content-type"], "image/svg+xml")
+                self.assertTrue(image.content.startswith(b"<svg"))
+
+                manifest_json = client.get(
+                    f"/projects/{project_id}/keyframes/manifest.json"
+                )
+                self.assertEqual(manifest_json.status_code, 200)
+                manifest = manifest_json.json()
+                self.assertEqual(len(manifest["tasks"]), 10)
+                self.assertEqual(manifest["progress"]["succeeded"], 10)
+                manifest_pdf = client.get(
+                    f"/projects/{project_id}/keyframes/manifest.pdf"
+                )
+                self.assertEqual(manifest_pdf.status_code, 200)
+                self.assertTrue(manifest_pdf.content.startswith(b"%PDF-1.4"))
+
+                package = client.get(
+                    f"/projects/{project_id}/keyframes/export.zip"
+                )
+                self.assertEqual(package.status_code, 200)
+                with zipfile.ZipFile(BytesIO(package.content)) as archive:
+                    names = set(archive.namelist())
+                    self.assertIn("manifest.json", names)
+                    self.assertIn("manifest.pdf", names)
+                    self.assertEqual(
+                        len(
+                            [
+                                name
+                                for name in names
+                                if name.startswith("keyframes/")
+                            ]
+                        ),
+                        10,
+                    )
+                    zipped_manifest = json.loads(
+                        archive.read("manifest.json").decode("utf-8")
+                    )
+                    self.assertEqual(zipped_manifest["tasks"], manifest["tasks"])
+        finally:
+            main_module.keyframe_image_adapter = original_adapter
+
     def test_shot_editor_reorder_versioning_local_regenerate_and_lock(self):
         with TestClient(app) as client:
             project_id = client.post(
@@ -525,7 +666,15 @@ class ApiIntegrationTest(unittest.TestCase):
                 200,
             )
             self.assertEqual(client.post("/story/create", json={"project_id": project_id}).status_code, 200)
-            self.assertEqual(client.post("/shots/create", json={"project_id": project_id}).status_code, 200)
+            shots = client.post("/shots/create", json={"project_id": project_id})
+            self.assertEqual(shots.status_code, 200)
+            self.assertEqual(
+                client.post(
+                    f"/projects/{project_id}/keyframes/start",
+                    json={"expected_shots_version": shots.json()["version"]},
+                ).status_code,
+                200,
+            )
             self.assertEqual(client.post("/render/start", json={"project_id": project_id}).status_code, 202)
 
             before = count_project_dependents(project_id)

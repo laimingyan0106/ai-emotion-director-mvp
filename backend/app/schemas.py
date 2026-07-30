@@ -158,6 +158,33 @@ class ShotSetMutationResponse(BaseModel):
     warnings: list[AssetDependencyWarning] = Field(default_factory=list)
 
 
+class KeyframeGenerateRequest(BaseModel):
+    expected_shots_version: int = Field(ge=1)
+
+
+class KeyframeMutationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+
+
+class KeyframeConfirmationRequest(KeyframeMutationRequest):
+    confirmed: bool
+
+
+class KeyframeProgress(BaseModel):
+    total: int = Field(ge=0)
+    queued: int = Field(ge=0)
+    running: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    confirmed: int = Field(ge=0)
+
+
+class KeyframeMutationResponse(BaseModel):
+    asset: AssetVersion
+    progress: KeyframeProgress
+    consistency_warnings: list[str] = Field(default_factory=list)
+
+
 class ProjectResponse(BaseModel):
     id: UUID
     name: str

@@ -22,9 +22,16 @@ import {
   getApiMode,
   generateCharacterReferences,
   ProjectSnapshot,
+  KeyframeTask,
+  confirmKeyframe,
+  keyframeExportUrl,
+  keyframeImageUrl,
+  retryFailedKeyframes,
+  retryKeyframe,
   SegmentCandidate,
   regenerateShot,
   selectCharacterReferences,
+  startKeyframes,
   updateShots,
   updateProject,
   updateWorld,
@@ -280,6 +287,10 @@ export default function Home() {
   const [shotBusy, setShotBusy] = useState(false);
   const [shotDirty, setShotDirty] = useState(false);
   const [dragShotId, setDragShotId] = useState("");
+  const [keyframeAsset, setKeyframeAsset] = useState<AssetVersion | null>(null);
+  const [keyframeTasks, setKeyframeTasks] = useState<KeyframeTask[]>([]);
+  const [keyframeWarnings, setKeyframeWarnings] = useState<string[]>([]);
+  const [keyframeBusyShot, setKeyframeBusyShot] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const lastSavedName = useRef(projectName);
 
@@ -297,6 +308,8 @@ export default function Home() {
           setApiProjectId(project.id);
           setRemoteAudio(project.audio);
           if (project.audio) {
+            // Initial restoration intentionally invokes the stable function declaration below.
+            // eslint-disable-next-line react-hooks/immutability
             await restoreProjectSegment(project.id);
           }
         } else {
@@ -341,6 +354,20 @@ export default function Home() {
     () => shotCards.reduce((sum, shot) => sum + Number(shot.duration ?? 3), 0),
     [shotCards],
   );
+  const keyframeProgress = useMemo(() => {
+    const succeeded = keyframeTasks.filter((task) => task.status === "succeeded").length;
+    const failed = keyframeTasks.filter((task) => task.status === "failed").length;
+    const confirmed = keyframeTasks.filter((task) => task.confirmed).length;
+    return {
+      total: keyframeTasks.length || shotCards.length,
+      succeeded,
+      failed,
+      confirmed,
+      percent: keyframeTasks.length
+        ? Math.round(((succeeded + failed) / keyframeTasks.length) * 100)
+        : 0,
+    };
+  }, [keyframeTasks, shotCards.length]);
 
   function acceptFile(candidate?: File) {
     if (!candidate) return;
@@ -396,10 +423,12 @@ export default function Home() {
     const activeCharacter = versions.groups.character?.find((asset) => asset.is_active) ?? null;
     const activeStory = versions.groups.story?.find((asset) => asset.is_active) ?? null;
     const activeShots = versions.groups.shots?.find((asset) => asset.is_active) ?? null;
+    const activeKeyframes = versions.groups.keyframes?.find((asset) => asset.is_active) ?? null;
     hydrateWorld(activeWorld);
     hydrateCharacter(activeCharacter);
     setStoryAsset(activeStory);
     hydrateShots(activeShots);
+    hydrateKeyframes(activeKeyframes);
     if (activeAnalysis) {
       const values = activeAnalysis.payload.energy_curve;
       if (Array.isArray(values)) {
@@ -502,6 +531,21 @@ export default function Home() {
     setShotCards(cards);
     setActiveShot((current) => Math.min(current, cards.length - 1));
     setShotDirty(false);
+  }
+
+  function hydrateKeyframes(asset: AssetVersion | null, warnings: string[] = []) {
+    setKeyframeAsset(asset);
+    const tasks = Array.isArray(asset?.payload.tasks)
+      ? asset.payload.tasks as KeyframeTask[]
+      : [];
+    setKeyframeTasks(tasks);
+    setKeyframeWarnings(
+      warnings.length
+        ? warnings
+        : tasks
+            .filter((task) => task.status === "failed")
+            .map((task) => `${task.shot_id} 关键帧生成失败，可单独重试。`),
+    );
   }
 
   function toggleWorldLock(path: string) {
@@ -964,10 +1008,80 @@ export default function Home() {
     showToast("完整导演方案已导出");
   }
 
-  function startRender() {
-    setStage("rendering");
-    showToast("已创建 10 个镜头渲染任务");
-    window.setTimeout(() => setStage("ready"), 2600);
+  async function startKeyframeQueue() {
+    if (!apiProjectId || !shotAsset || shotDirty || Math.abs(totalDuration - 30) >= 0.001) {
+      showToast("请先保存有效的 30 秒 ShotSet");
+      return;
+    }
+    setKeyframeBusyShot("all");
+    setApiError("");
+    try {
+      const result = await startKeyframes(apiProjectId, shotAsset.version);
+      hydrateKeyframes(result.asset, result.consistency_warnings);
+      showToast(
+        result.progress.failed
+          ? `关键帧完成 ${result.progress.succeeded}/${result.progress.total}，${result.progress.failed} 个可重试`
+          : `${result.progress.succeeded} 个关键帧已全部生成`,
+      );
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "关键帧队列启动失败。");
+    } finally {
+      setKeyframeBusyShot("");
+    }
+  }
+
+  async function retryOneKeyframe(shotId: string) {
+    if (!apiProjectId || !keyframeAsset) return;
+    setKeyframeBusyShot(shotId);
+    setApiError("");
+    try {
+      const result = await retryKeyframe(
+        apiProjectId,
+        shotId,
+        keyframeAsset.version,
+      );
+      hydrateKeyframes(result.asset, result.consistency_warnings);
+      showToast(`${shotId} 关键帧已重试`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : `${shotId} 重试失败。`);
+    } finally {
+      setKeyframeBusyShot("");
+    }
+  }
+
+  async function retryAllFailed() {
+    if (!apiProjectId || !keyframeAsset) return;
+    setKeyframeBusyShot("failed");
+    setApiError("");
+    try {
+      const result = await retryFailedKeyframes(apiProjectId, keyframeAsset.version);
+      hydrateKeyframes(result.asset, result.consistency_warnings);
+      showToast(`失败任务重试完成：${result.progress.succeeded}/${result.progress.total}`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "整组重试失败。");
+    } finally {
+      setKeyframeBusyShot("");
+    }
+  }
+
+  async function toggleKeyframeConfirmation(task: KeyframeTask) {
+    if (!apiProjectId || !keyframeAsset || task.status !== "succeeded") return;
+    setKeyframeBusyShot(task.shot_id);
+    setApiError("");
+    try {
+      const result = await confirmKeyframe(
+        apiProjectId,
+        task.shot_id,
+        keyframeAsset.version,
+        !task.confirmed,
+      );
+      hydrateKeyframes(result.asset, result.consistency_warnings);
+      showToast(`${task.shot_id} 已${task.confirmed ? "取消确认" : "确认并锁定"}`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "关键帧确认失败。");
+    } finally {
+      setKeyframeBusyShot("");
+    }
   }
 
   const isReady = stage === "ready" || stage === "rendering";
@@ -1474,36 +1588,101 @@ export default function Home() {
 
         {view === "render" && (
           <div className="page studio-page">
-            <PageHeading overline="RENDER FLOW / 06" title="渲染调度台" subtitle="Adapter 让图像与视频模型可替换，导演资产保持不变。" ready={isReady} />
+            <PageHeading
+              overline={`KEYFRAME QUEUE / 06${keyframeAsset ? ` · V${keyframeAsset.version}` : ""}`}
+              title="关键帧生成队列"
+              subtitle="逐镜头组合 World、Character 与 Shot Prompt；本阶段只生成关键帧，不生成视频。"
+              ready={keyframeProgress.succeeded === shotCards.length && keyframeProgress.failed === 0}
+            />
             <div className="render-grid">
               <section className="panel render-summary">
-                <div className="render-ring"><strong>{stage === "rendering" ? "62" : "100"}<small>%</small></strong><span>{stage === "rendering" ? "RENDERING" : "PLAN READY"}</span></div>
+                <div className="render-ring">
+                  <strong>{keyframeProgress.percent}<small>%</small></strong>
+                  <span>{keyframeBusyShot ? "GENERATING" : keyframeAsset ? "TRACEABLE" : "READY"}</span>
+                </div>
                 <div>
-                  <h3>{stage === "rendering" ? "正在渲染镜头 S07" : "30 秒方案已就绪"}</h3>
-                  <p>10 个镜头 · 720 帧 · 16:9 · 24 FPS</p>
-                  <button className="primary-button" onClick={startRender} disabled={!isReady || stage === "rendering"}>开始视频渲染</button>
+                  <h3>{keyframeProgress.succeeded}/{keyframeProgress.total} 个镜头拥有关键帧</h3>
+                  <p>{keyframeProgress.failed} 个失败 · {keyframeProgress.confirmed} 个已确认锁定 · ShotSet v{shotAsset?.version ?? "—"}</p>
+                  <div className="render-actions">
+                    <button
+                      className="primary-button"
+                      onClick={() => void startKeyframeQueue()}
+                      disabled={!isReady || Boolean(keyframeBusyShot) || shotDirty || Math.abs(totalDuration - 30) >= 0.001}
+                    >
+                      {keyframeBusyShot === "all" ? "生成中…" : keyframeAsset ? "重新生成未确认镜头" : "生成全部关键帧"}
+                    </button>
+                    {keyframeProgress.failed > 0 && (
+                      <button className="ghost-button" disabled={Boolean(keyframeBusyShot)} onClick={() => void retryAllFailed()}>
+                        {keyframeBusyShot === "failed" ? "重试中…" : "重试全部失败"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </section>
               <section className="panel adapter-panel">
-                <div className="panel-title"><span>MODEL ADAPTERS</span><strong>模型路由</strong></div>
+                <div className="panel-title"><span>MODEL ADAPTERS</span><strong>模型与版本追溯</strong></div>
                 {[
                   ["LLM", "Demo Director LLM", "已连接"],
-                  ["IMAGE", "Image Adapter", "待配置"],
-                  ["VIDEO", "Video Adapter", "待配置"],
+                  ["IMAGE", keyframeTasks[0]?.model || "Deterministic SVG", keyframeTasks.length ? "已连接" : "待运行"],
+                  ["VIDEO", "T013 / 剪映小助手", "下一阶段"],
                 ].map(([type, name, status]) => <div className="adapter-row" key={type}><span>{type}</span><strong>{name}</strong><Badge tone={status === "已连接" ? "success" : "neutral"}>{status}</Badge></div>)}
+                {keyframeAsset && (
+                  <div className="export-links">
+                    <a href={keyframeExportUrl(apiProjectId, "zip")} download>导出 ZIP</a>
+                    <a href={keyframeExportUrl(apiProjectId, "pdf")} download>PDF 清单</a>
+                    <a href={keyframeExportUrl(apiProjectId, "json")} download>JSON 清单</a>
+                  </div>
+                )}
               </section>
             </div>
+            {keyframeWarnings.length > 0 && (
+              <section className="consistency-warning panel">
+                <strong>一致性提醒</strong>
+                {keyframeWarnings.map((warning) => <p key={warning}>{warning}</p>)}
+              </section>
+            )}
             <section className="panel queue-panel">
-              <div className="panel-title"><span>RENDER QUEUE</span><strong>镜头任务</strong></div>
-              <div className="queue-head"><span>镜头</span><span>内容</span><span>时长</span><span>状态</span></div>
-              {shotCards.map((shot, index) => (
-                <div className="queue-row" key={shot.id}>
-                  <span>{shot.id}</span><strong>{shot.action}</strong><span>{Number(shot.duration ?? 3).toFixed(1)}s</span>
-                  <Badge tone={stage === "rendering" && index < 6 ? "success" : index === 0 || stage === "ready" ? "neutral" : "gold"}>
-                    {stage === "rendering" ? (index < 6 ? "完成" : index === 6 ? "渲染中" : "排队") : "待渲染"}
-                  </Badge>
-                </div>
-              ))}
+              <div className="panel-title"><span>KEYFRAME TASKS</span><strong>镜头任务 · provider task id / 状态 / 结果</strong></div>
+              <div className="queue-head keyframe-head"><span>镜头</span><span>预览与内容</span><span>任务追溯</span><span>状态 / 操作</span></div>
+              {shotCards.map((shot) => {
+                const task = keyframeTasks.find((item) => item.shot_id === shot.id);
+                return (
+                  <div className="queue-row keyframe-row" key={shot.id}>
+                    <span>{shot.id}</span>
+                    <div className="keyframe-content">
+                      {task?.result && apiProjectId ? (
+                        <a href={keyframeImageUrl(apiProjectId, shot.id)} target="_blank" rel="noreferrer">
+                          <img src={keyframeImageUrl(apiProjectId, shot.id)} alt={`${shot.id} 关键帧`} />
+                        </a>
+                      ) : <div className="keyframe-placeholder">NO FRAME</div>}
+                      <strong>{shot.action}</strong>
+                    </div>
+                    <div className="keyframe-trace">
+                      <code>{task?.provider_task_id || "尚未提交"}</code>
+                      <small>{task ? `${task.provider} · ${task.model} · attempt ${task.attempt}` : "等待关键帧队列"}</small>
+                      {task?.error && <small className="task-error">{task.error}</small>}
+                    </div>
+                    <div className="keyframe-controls">
+                      <Badge tone={task?.status === "succeeded" ? "success" : task?.status === "failed" ? "gold" : "neutral"}>
+                        {task?.confirmed ? "已确认" : task?.status === "succeeded" ? "已完成" : task?.status === "failed" ? "失败" : "待生成"}
+                      </Badge>
+                      {task?.status === "failed" && (
+                        <button disabled={Boolean(keyframeBusyShot)} onClick={() => void retryOneKeyframe(shot.id)}>
+                          {keyframeBusyShot === shot.id ? "重试中…" : "单镜头重试"}
+                        </button>
+                      )}
+                      {task?.status === "succeeded" && (
+                        <>
+                          <button disabled={Boolean(keyframeBusyShot)} onClick={() => void toggleKeyframeConfirmation(task)}>
+                            {task.confirmed ? "取消确认" : "确认关键帧"}
+                          </button>
+                          <a href={keyframeImageUrl(apiProjectId, shot.id, true)} download>下载</a>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </section>
           </div>
         )}

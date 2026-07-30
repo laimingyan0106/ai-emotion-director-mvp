@@ -82,3 +82,21 @@ test("Shot Studio exposes server-versioned editing and local regeneration", asyn
   assert.match(reducer, /start_ms/);
   assert.match(reducer, /reduceShotTimeline/);
 });
+
+test("Keyframe queue exposes retries, confirmation locks, and traceable exports", async () => {
+  const [page, client] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("lib/api-client.ts", root), "utf8"),
+  ]);
+  assert.match(page, /KEYFRAME QUEUE/);
+  assert.match(page, /本阶段只生成关键帧，不生成视频/);
+  assert.match(page, /单镜头重试/);
+  assert.match(page, /确认关键帧/);
+  assert.match(page, /provider task id/);
+  assert.match(page, /导出 ZIP/);
+  assert.match(client, /export function startKeyframes/);
+  assert.match(client, /export function retryKeyframe/);
+  assert.match(client, /export function retryFailedKeyframes/);
+  assert.match(client, /export function confirmKeyframe/);
+  assert.match(client, /export function keyframeExportUrl/);
+});

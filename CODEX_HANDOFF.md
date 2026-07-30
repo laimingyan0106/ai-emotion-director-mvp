@@ -381,4 +381,40 @@ docker compose up --build
   - Mock 单镜头 Adapter 验证只调用一次且仅目标镜头变化 PASS
   - 锁定镜头局部再生成拒绝、整组再生成保留测试 PASS
   - 前端测试、ESLint、TypeScript、Next/Vinext 构建 PASS
-- 下一任务：`V11-T012`，实现关键帧生成队列、重试、进度与导出包。
+- 生产验收：
+  - 公开 Vercel 完成 ShotSet v1 → v2 → v3
+  - v2 编辑/复制/删除后服务端重算为连续 30,000ms
+  - v3 单镜头再生成仅 S03 变化，其他 9 个镜头保持不变
+  - 临时验收项目与音频已清理
+
+### V11-T012：关键帧生成队列
+
+- 状态：完成
+- KeyframeSet 资产与任务追溯：
+  - 每个镜头任务保存 `provider_task_id`、状态、Provider、模型、Prompt、尝试次数、脱敏错误与结果
+  - 结果保存私有存储路径、内容类型、尺寸和 SHA-256
+  - 每个任务记录精确的 World、Character、ShotSet asset_id/version 与镜头内容校验和
+  - KeyframeSet 所有修改继续创建新版本，不原地覆盖
+- 生成与重试：
+  - `POST /projects/{project_id}/keyframes/start` 生成全部未确认镜头
+  - `POST /projects/{project_id}/keyframes/{shot_id}/retry` 只重试一个镜头
+  - `POST /projects/{project_id}/keyframes/retry-failed` 重试全部失败任务
+  - Demo/Mock Adapter 生成确定性 16:9 SVG；失败持久化到任务，不让整组请求丢失
+  - 已确认关键帧在整组重新生成中原样保留，单镜头重试返回 409
+- 确认、预览与导出：
+  - `PATCH /projects/{project_id}/keyframes/{shot_id}` 确认或取消确认
+  - 私有图片通过项目/镜头代理接口预览和下载
+  - JSON 清单包含完整任务、输入版本、校验和、错误与一致性警告
+  - PDF 清单可独立下载
+  - ZIP 包含 `manifest.json`、`manifest.pdf` 与全部成功关键帧，并在打包前复核 SHA-256
+- 前端：
+  - “渲染队列”已改为 T012 关键帧队列，本阶段明确不生成视频
+  - 展示实时完成率、失败数、确认数、一致性提醒和 provider task id
+  - 支持单镜头重试、全部失败重试、确认锁、预览、单张下载和 ZIP/PDF/JSON 导出
+  - 视频与剪映小助手交付明确留到 T013
+- 验证结果：
+  - 后端 32/32 测试 PASS
+  - Mock Adapter 部分失败、单镜头重试、确认后禁止覆盖测试 PASS
+  - 10 张图片、PDF/JSON 清单与 ZIP 完整性测试 PASS
+  - 前端 8/8、ESLint、TypeScript、Next/Vinext 构建 PASS
+- 下一任务：`V11-T013`，完成全链路 E2E、结构化日志、脱敏、安全扫描、Provider 验收、部署文档与剪映小助手成片交付。

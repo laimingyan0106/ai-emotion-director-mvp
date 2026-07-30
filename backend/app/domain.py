@@ -19,6 +19,10 @@ HexColor = Annotated[str, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}$")]
 CharacterId = Annotated[str, StringConstraints(pattern=r"^CHAR-\d{3}$")]
 ShotId = Annotated[str, StringConstraints(pattern=r"^S\d{2}$")]
 ReferenceId = Annotated[str, StringConstraints(pattern=r"^REF-[A-Z0-9-]{4,40}$")]
+ProviderTaskId = Annotated[
+    str,
+    StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{5,159}$"),
+]
 
 
 class WorldCinematography(StrictDomainModel):
@@ -172,6 +176,51 @@ class ShotSetAsset(StrictDomainModel):
         return self
 
 
+class KeyframeResult(StrictDomainModel):
+    storage_path: str = Field(min_length=1, max_length=2000)
+    content_type: Literal["image/svg+xml", "image/png", "image/jpeg", "image/webp"]
+    width: int = Field(ge=64, le=8192)
+    height: int = Field(ge=64, le=8192)
+    sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class KeyframeTask(StrictDomainModel):
+    shot_id: ShotId
+    provider_task_id: ProviderTaskId
+    status: Literal["queued", "running", "succeeded", "failed"]
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=1, max_length=12000)
+    attempt: int = Field(ge=1, le=20)
+    confirmed: bool = False
+    error: str | None = Field(default=None, max_length=1000)
+    result: KeyframeResult | None = None
+    source: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_status_result(self) -> "KeyframeTask":
+        if self.status == "succeeded" and self.result is None:
+            raise ValueError("Succeeded keyframe task requires a result")
+        if self.status == "failed" and not self.error:
+            raise ValueError("Failed keyframe task requires an error")
+        if self.confirmed and self.status != "succeeded":
+            raise ValueError("Only succeeded keyframes can be confirmed")
+        return self
+
+
+class KeyframeSetAsset(StrictDomainModel):
+    shots_asset_id: int = Field(ge=1)
+    shots_version: int = Field(ge=1)
+    tasks: list[KeyframeTask] = Field(min_length=1, max_length=60)
+
+    @model_validator(mode="after")
+    def validate_unique_shots(self) -> "KeyframeSetAsset":
+        shot_ids = [task.shot_id for task in self.tasks]
+        if len(shot_ids) != len(set(shot_ids)):
+            raise ValueError("Keyframe tasks must contain unique shot IDs")
+        return self
+
+
 class ConfirmedSegmentAsset(StrictDomainModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
@@ -194,6 +243,7 @@ DOMAIN_MODELS: dict[str, type[StrictDomainModel]] = {
     "character": CharacterAsset,
     "story": StoryAsset,
     "shots": ShotSetAsset,
+    "keyframes": KeyframeSetAsset,
 }
 
 

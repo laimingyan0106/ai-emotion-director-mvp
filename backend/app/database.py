@@ -430,6 +430,11 @@ def delete_project_record(project_id: UUID) -> list[str] | None:
                 storage_path = reference.get("storage_path")
                 if storage_path:
                     storage_paths.add(str(storage_path))
+            for task in payload.get("tasks", []):
+                result = task.get("result") if isinstance(task, dict) else None
+                storage_path = result.get("storage_path") if isinstance(result, dict) else None
+                if storage_path:
+                    storage_paths.add(str(storage_path))
 
         if isinstance(database, SqliteDatabase):
             for table in ("render_jobs", "generated_assets", "audio_assets"):

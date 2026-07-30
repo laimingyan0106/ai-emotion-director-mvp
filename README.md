@@ -65,6 +65,7 @@ docker compose up --build
 - World Bible v1.1 将稳定规则与可变状态分开保存；World Studio 支持结构化字段编辑、字段锁定和重新生成，锁定值不会在再生成时漂移，镜头资产会记录明确的 World asset/version 输入快照。
 - Character Asset v1.1 保存负面约束、Provider 绑定和 portrait/half/full 三类参考图；用户确认并锁定后，镜头同时记录 character_id、asset_id 和 version。未完成三类参考图确认时，界面明确提示仅凭文本无法保证人物一致。
 - ShotSet v1.1 支持字段编辑、拖拽重排、新增、删除、复制、镜头锁定和单镜头局部再生成；所有写入创建新版本，服务端重算 `start_ms` 并严格校验总时长，锁定镜头不会被整组重新生成覆盖。
+- KeyframeSet v1.1 为每个镜头组合 World/Character/Shot Prompt，持久化 provider task id、状态、错误、重试次数、结果校验和与输入资产版本；支持单镜头/整组失败重试、用户确认锁、私有图片代理，以及包含 10 张关键帧和 PDF/JSON 清单的 ZIP 导出。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 

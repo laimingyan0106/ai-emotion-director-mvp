@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BytesIO
+import json
 from pathlib import Path
 import tempfile
 from uuid import UUID, uuid4
@@ -12,7 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .config import get_settings
-from .domain import CharacterAsset, ShotSetAsset, validate_domain_asset
+from .domain import (
+    CharacterAsset,
+    KeyframeSetAsset,
+    ShotSetAsset,
+    validate_domain_asset,
+)
 from .database import (
     create_project_record,
     create_render_job,
@@ -40,6 +46,11 @@ from .schemas import (
     CharacterReferenceResponse,
     CharacterReferenceSelectionRequest,
     CharacterRequest,
+    KeyframeConfirmationRequest,
+    KeyframeGenerateRequest,
+    KeyframeMutationRequest,
+    KeyframeMutationResponse,
+    KeyframeProgress,
     PipelineAsset,
     ProjectCreate,
     ProjectListResponse,
@@ -62,6 +73,15 @@ from .services.adapters import get_director_adapter
 from .services.audio import analyze_audio_file, demo_analysis
 from .services.character_references import get_character_image_adapter
 from .services.generation import AssetGenerationError, generate_validated_asset
+from .services.keyframes import (
+    build_keyframe_zip,
+    generate_keyframe_task,
+    get_keyframe_image_adapter,
+    keyframe_consistency_warnings,
+    keyframe_progress,
+    manifest_document,
+    render_manifest_pdf,
+)
 from .services.providers import ProviderRequestError
 from .services.segments import (
     SegmentSelectionError,
@@ -86,6 +106,7 @@ settings = get_settings()
 adapter = get_director_adapter()
 media_storage = get_media_storage()
 character_image_adapter = get_character_image_adapter()
+keyframe_image_adapter = get_keyframe_image_adapter()
 
 
 @asynccontextmanager
@@ -400,6 +421,7 @@ def generation_input_snapshot(
         "character": {"audio_analysis", "segment", "world"},
         "story": {"audio_analysis", "segment", "world", "character"},
         "shots": {"audio_analysis", "segment", "world", "character", "story"},
+        "keyframes": {"world", "character", "shots"},
     }
     snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
     return {
@@ -997,6 +1019,343 @@ def regenerate_project_shot(
     return ShotSetMutationResponse(
         asset=AssetVersion.model_validate(asset),
         warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+def _active_keyframe_asset(project_id: UUID) -> dict:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "keyframes")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active keyframe set not found")
+    return current
+
+
+def _assert_keyframe_version(current: dict, expected_version: int) -> None:
+    if int(current["version"]) != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Keyframe set version conflict: expected {expected_version}, "
+                f"active is {current['version']}"
+            ),
+        )
+
+
+def _keyframe_response(asset: dict) -> KeyframeMutationResponse:
+    context = load_context(asset["project_id"])
+    payload = asset["payload"]
+    return KeyframeMutationResponse(
+        asset=AssetVersion.model_validate(asset),
+        progress=KeyframeProgress.model_validate(keyframe_progress(payload["tasks"])),
+        consistency_warnings=keyframe_consistency_warnings(
+            payload=payload,
+            context=context,
+        ),
+    )
+
+
+def _persist_keyframes(
+    project_id: UUID,
+    *,
+    tasks: list[dict],
+    context: dict,
+    prompt: str,
+) -> dict:
+    shots_version = context["asset_versions"]["shots"]
+    payload = KeyframeSetAsset(
+        shots_asset_id=shots_version["asset_id"],
+        shots_version=shots_version["version"],
+        tasks=tasks,
+    ).model_dump(mode="json")
+    return insert_asset_version(
+        project_id,
+        "keyframes",
+        payload,
+        activate=True,
+        provider=keyframe_image_adapter.provider,
+        model=keyframe_image_adapter.model,
+        prompt=prompt,
+        input_snapshot=generation_input_snapshot(project_id, "keyframes"),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/keyframes/start",
+    response_model=KeyframeMutationResponse,
+)
+async def start_keyframes(
+    project_id: UUID,
+    payload: KeyframeGenerateRequest,
+) -> KeyframeMutationResponse:
+    context = load_context(project_id)
+    for required in ("world", "character", "shots"):
+        if required not in context["assets"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Create {required} before generating keyframes",
+            )
+    shots_version = context["asset_versions"]["shots"]
+    if shots_version["version"] != payload.expected_shots_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"ShotSet version conflict: expected {payload.expected_shots_version}, "
+                f"active is {shots_version['version']}"
+            ),
+        )
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "keyframes")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    confirmed_by_shot = {
+        task["shot_id"]: task
+        for task in (current["payload"]["tasks"] if current else [])
+        if task.get("confirmed")
+    }
+    tasks = []
+    for shot in context["assets"]["shots"]["shots"]:
+        if shot["id"] in confirmed_by_shot:
+            tasks.append(confirmed_by_shot[shot["id"]])
+            continue
+        task = await generate_keyframe_task(
+            project_id=str(project_id),
+            shot=shot,
+            context=context,
+            adapter=keyframe_image_adapter,
+            media_storage=media_storage,
+        )
+        tasks.append(task.model_dump(mode="json"))
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt="Generate keyframes for every unconfirmed shot",
+    )
+    return _keyframe_response(asset)
+
+
+@app.post(
+    "/projects/{project_id}/keyframes/{shot_id}/retry",
+    response_model=KeyframeMutationResponse,
+)
+async def retry_keyframe(
+    project_id: UUID,
+    shot_id: str,
+    payload: KeyframeMutationRequest,
+) -> KeyframeMutationResponse:
+    current = _active_keyframe_asset(project_id)
+    _assert_keyframe_version(current, payload.expected_version)
+    existing = next(
+        (task for task in current["payload"]["tasks"] if task["shot_id"] == shot_id),
+        None,
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Keyframe task not found")
+    if existing.get("confirmed"):
+        raise HTTPException(
+            status_code=409,
+            detail="Confirmed keyframes cannot be overwritten",
+        )
+    context = load_context(project_id)
+    shot = next(
+        (
+            item
+            for item in context["assets"]["shots"]["shots"]
+            if item["id"] == shot_id
+        ),
+        None,
+    )
+    if not shot:
+        raise HTTPException(status_code=409, detail="Shot is no longer active")
+    regenerated = await generate_keyframe_task(
+        project_id=str(project_id),
+        shot=shot,
+        context=context,
+        adapter=keyframe_image_adapter,
+        media_storage=media_storage,
+        attempt=int(existing["attempt"]) + 1,
+    )
+    tasks = [
+        regenerated.model_dump(mode="json") if task["shot_id"] == shot_id else task
+        for task in current["payload"]["tasks"]
+    ]
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt=f"Retry only keyframe {shot_id}",
+    )
+    return _keyframe_response(asset)
+
+
+@app.post(
+    "/projects/{project_id}/keyframes/retry-failed",
+    response_model=KeyframeMutationResponse,
+)
+async def retry_failed_keyframes(
+    project_id: UUID,
+    payload: KeyframeMutationRequest,
+) -> KeyframeMutationResponse:
+    current = _active_keyframe_asset(project_id)
+    _assert_keyframe_version(current, payload.expected_version)
+    context = load_context(project_id)
+    shots = {
+        shot["id"]: shot for shot in context["assets"]["shots"]["shots"]
+    }
+    tasks = []
+    for existing in current["payload"]["tasks"]:
+        if existing["status"] != "failed":
+            tasks.append(existing)
+            continue
+        shot = shots.get(existing["shot_id"])
+        if not shot:
+            tasks.append(existing)
+            continue
+        regenerated = await generate_keyframe_task(
+            project_id=str(project_id),
+            shot=shot,
+            context=context,
+            adapter=keyframe_image_adapter,
+            media_storage=media_storage,
+            attempt=int(existing["attempt"]) + 1,
+        )
+        tasks.append(regenerated.model_dump(mode="json"))
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt="Retry all failed keyframes",
+    )
+    return _keyframe_response(asset)
+
+
+@app.patch(
+    "/projects/{project_id}/keyframes/{shot_id}",
+    response_model=KeyframeMutationResponse,
+)
+def confirm_keyframe(
+    project_id: UUID,
+    shot_id: str,
+    payload: KeyframeConfirmationRequest,
+) -> KeyframeMutationResponse:
+    current = _active_keyframe_asset(project_id)
+    _assert_keyframe_version(current, payload.expected_version)
+    found = False
+    tasks = deepcopy(current["payload"]["tasks"])
+    for task in tasks:
+        if task["shot_id"] != shot_id:
+            continue
+        found = True
+        if payload.confirmed and task["status"] != "succeeded":
+            raise HTTPException(
+                status_code=409,
+                detail="Only succeeded keyframes can be confirmed",
+            )
+        task["confirmed"] = payload.confirmed
+    if not found:
+        raise HTTPException(status_code=404, detail="Keyframe task not found")
+    context = load_context(project_id)
+    asset = _persist_keyframes(
+        project_id,
+        tasks=tasks,
+        context=context,
+        prompt=f"Set {shot_id} confirmed={payload.confirmed}",
+    )
+    return _keyframe_response(asset)
+
+
+def _keyframe_task_with_result(project_id: UUID, shot_id: str) -> dict:
+    current = _active_keyframe_asset(project_id)
+    task = next(
+        (item for item in current["payload"]["tasks"] if item["shot_id"] == shot_id),
+        None,
+    )
+    if not task or not task.get("result"):
+        raise HTTPException(status_code=404, detail="Keyframe result not found")
+    return task
+
+
+@app.get("/projects/{project_id}/keyframes/{shot_id}/image")
+async def get_keyframe_image(
+    project_id: UUID,
+    shot_id: str,
+    download: bool = False,
+) -> Response:
+    task = _keyframe_task_with_result(project_id, shot_id)
+    result = task["result"]
+    try:
+        content = await media_storage.read(result["storage_path"])
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Keyframe file not found") from error
+    extension = {
+        "image/svg+xml": "svg",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+    }[result["content_type"]]
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type=result["content_type"],
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{shot_id}.{extension}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _active_keyframe_manifest(project_id: UUID) -> tuple[dict, dict]:
+    asset = _active_keyframe_asset(project_id)
+    context = load_context(project_id)
+    return asset, manifest_document(asset, context)
+
+
+@app.get("/projects/{project_id}/keyframes/manifest.json")
+def download_keyframe_manifest_json(project_id: UUID) -> Response:
+    _, manifest = _active_keyframe_manifest(project_id)
+    return Response(
+        content=json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="keyframes-manifest.json"'},
+    )
+
+
+@app.get("/projects/{project_id}/keyframes/manifest.pdf")
+def download_keyframe_manifest_pdf(project_id: UUID) -> Response:
+    _, manifest = _active_keyframe_manifest(project_id)
+    return Response(
+        content=render_manifest_pdf(manifest),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="keyframes-manifest.pdf"'},
+    )
+
+
+@app.get("/projects/{project_id}/keyframes/export.zip")
+async def download_keyframe_export(project_id: UUID) -> Response:
+    asset = _active_keyframe_asset(project_id)
+    context = load_context(project_id)
+    try:
+        content = await build_keyframe_zip(
+            asset=asset,
+            context=context,
+            media_storage=media_storage,
+        )
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="keyframes-export.zip"'},
     )
 
 

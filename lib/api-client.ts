@@ -64,6 +64,39 @@ export type AssetVersionsResponse = {
   warnings: AssetDependencyWarning[];
 };
 
+export type KeyframeTask = {
+  shot_id: string;
+  provider_task_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  provider: string;
+  model: string;
+  prompt: string;
+  attempt: number;
+  confirmed: boolean;
+  error: string | null;
+  result: {
+    storage_path: string;
+    content_type: string;
+    width: number;
+    height: number;
+    sha256: string;
+  } | null;
+  source: Record<string, unknown>;
+};
+
+export type KeyframeMutationResponse = {
+  asset: AssetVersion;
+  progress: {
+    total: number;
+    queued: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    confirmed: number;
+  };
+  consistency_warnings: string[];
+};
+
 export type SegmentCandidate = {
   category: "highlight" | "turn" | "stable";
   label: string;
@@ -100,6 +133,10 @@ const configuredBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().replace(/
 
 export function getApiMode(): ApiMode {
   return configuredBaseUrl ? "real" : "demo";
+}
+
+export function apiAssetUrl(path: string): string {
+  return configuredBaseUrl ? `${configuredBaseUrl}${path}` : "";
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -398,4 +435,75 @@ export function regenerateShot(
       body: JSON.stringify({ expected_version: expectedVersion }),
     },
   );
+}
+
+export function startKeyframes(
+  projectId: string,
+  expectedShotsVersion: number,
+): Promise<KeyframeMutationResponse> {
+  return request(`/projects/${encodeURIComponent(projectId)}/keyframes/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_shots_version: expectedShotsVersion }),
+  });
+}
+
+export function retryKeyframe(
+  projectId: string,
+  shotId: string,
+  expectedVersion: number,
+): Promise<KeyframeMutationResponse> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/keyframes/${encodeURIComponent(shotId)}/retry`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_version: expectedVersion }),
+    },
+  );
+}
+
+export function retryFailedKeyframes(
+  projectId: string,
+  expectedVersion: number,
+): Promise<KeyframeMutationResponse> {
+  return request(`/projects/${encodeURIComponent(projectId)}/keyframes/retry-failed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_version: expectedVersion }),
+  });
+}
+
+export function confirmKeyframe(
+  projectId: string,
+  shotId: string,
+  expectedVersion: number,
+  confirmed: boolean,
+): Promise<KeyframeMutationResponse> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/keyframes/${encodeURIComponent(shotId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_version: expectedVersion, confirmed }),
+    },
+  );
+}
+
+export function keyframeImageUrl(
+  projectId: string,
+  shotId: string,
+  download = false,
+): string {
+  return apiAssetUrl(
+    `/projects/${encodeURIComponent(projectId)}/keyframes/${encodeURIComponent(shotId)}/image${download ? "?download=true" : ""}`,
+  );
+}
+
+export function keyframeExportUrl(
+  projectId: string,
+  kind: "zip" | "json" | "pdf",
+): string {
+  const suffix = kind === "zip" ? "export.zip" : `manifest.${kind}`;
+  return apiAssetUrl(`/projects/${encodeURIComponent(projectId)}/keyframes/${suffix}`);
 }
