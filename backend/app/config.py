@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = Field(default=60, ge=5, le=300)
     llm_http_retries: int = Field(default=2, ge=0, le=5)
     image_api_key: str | None = None
+    image_adapter_mode: str = "auto"
     image_model: str = "gpt-image-2"
     image_base_url: str | None = None
     image_quality: str = "medium"
@@ -77,6 +78,12 @@ class Settings(BaseSettings):
     @property
     def resolved_image_base_url(self) -> str:
         return (self.image_base_url or self.llm_base_url).rstrip("/")
+
+    @property
+    def resolved_image_adapter_mode(self) -> str:
+        if self.image_adapter_mode != "auto":
+            return self.image_adapter_mode
+        return self.adapter_mode
 
 
 @lru_cache

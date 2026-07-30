@@ -103,6 +103,16 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(adapter, DemoKeyframeImageAdapter)
         self.assertIn("missing", adapter.fallback_reason)
 
+    def test_image_provider_can_run_with_demo_director(self):
+        settings = Settings(
+            _env_file=None,
+            adapter_mode="demo",
+            image_adapter_mode="provider",
+            image_api_key="test-secret",
+        )
+        adapter = get_keyframe_image_adapter(settings)
+        self.assertIsInstance(adapter, OpenAIKeyframeImageAdapter)
+
     def test_sanitizer_redacts_credentials(self):
         message = sanitize_provider_error(
             RuntimeError("Authorization: Bearer sk-secret-123456789 api_key=topsecret")

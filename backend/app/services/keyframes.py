@@ -195,13 +195,20 @@ def get_keyframe_image_adapter(
     settings: Settings | None = None,
 ) -> KeyframeImageAdapter:
     resolved_settings = settings or get_settings()
-    if resolved_settings.adapter_mode == "provider":
+    if resolved_settings.resolved_image_adapter_mode == "provider":
         if resolved_settings.resolved_image_api_key:
             return OpenAIKeyframeImageAdapter(resolved_settings)
         return DemoKeyframeImageAdapter(
             fallback_reason="Provider mode requested but IMAGE_API_KEY/OPENAI_API_KEY is missing"
         )
-    return DemoKeyframeImageAdapter()
+    if resolved_settings.resolved_image_adapter_mode == "demo":
+        return DemoKeyframeImageAdapter()
+    return DemoKeyframeImageAdapter(
+        fallback_reason=(
+            "Unsupported IMAGE_ADAPTER_MODE: "
+            f"{resolved_settings.resolved_image_adapter_mode}"
+        )
+    )
 
 
 def build_keyframe_prompt(

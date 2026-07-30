@@ -29,6 +29,7 @@ npm run dev
 - `ADAPTER_MODE=provider`：导演文本使用 `LLM_API_KEY` 或 `OPENAI_API_KEY`；关键帧优先使用 `IMAGE_API_KEY`，否则使用 `OPENAI_API_KEY`。
 - 默认图片模型是 `gpt-image-2`，尺寸 `1280x720`、质量 `medium`。
 - `/health` 返回导演 adapter 与 `keyframe_provider`、`keyframe_model`、`keyframe_fallback_reason`，用于确认真实调用或回退。
+- `IMAGE_ADAPTER_MODE=provider` 可让文本导演保持 Demo、关键帧单独使用真实图片 Provider；适用于中转站文本模型 ID 尚未确认但生图端点可用的情况。
 
 OpenAI 兼容中转站应填写基础地址，而不是把单个端点写入
 `LLM_BASE_URL`。例如 4sAPI：

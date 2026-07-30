@@ -149,6 +149,7 @@ def health() -> dict[str, str | bool | None]:
         "keyframe_provider": keyframe_image_adapter.provider,
         "keyframe_model": keyframe_image_adapter.model,
         "keyframe_fallback_reason": keyframe_image_adapter.fallback_reason,
+        "keyframe_adapter_configured": settings.resolved_image_adapter_mode,
     }
 
 
