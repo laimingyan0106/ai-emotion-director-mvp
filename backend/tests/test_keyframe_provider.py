@@ -24,6 +24,8 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
             body = json.loads(request.content)
             self.assertEqual(body["model"], "gpt-image-2")
             self.assertEqual(body["size"], "1280x720")
+            self.assertNotIn("quality", body)
+            self.assertNotIn("output_format", body)
             return httpx.Response(
                 200,
                 headers={"x-request-id": "req_provider_acceptance"},

@@ -118,9 +118,7 @@ class OpenAIKeyframeImageAdapter(KeyframeImageAdapter):
                     "model": self.model,
                     "prompt": prompt,
                     "size": self.size,
-                    "quality": self.quality,
                     "n": 1,
-                    "output_format": "png",
                 },
             )
         if response.status_code >= 400:

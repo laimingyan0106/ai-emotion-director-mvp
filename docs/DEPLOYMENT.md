@@ -30,6 +30,7 @@ npm run dev
 - 默认图片模型是 `gpt-image-2`，尺寸 `1280x720`、质量 `medium`。
 - `/health` 返回导演 adapter 与 `keyframe_provider`、`keyframe_model`、`keyframe_fallback_reason`，用于确认真实调用或回退。
 - `IMAGE_ADAPTER_MODE=provider` 可让文本导演保持 Demo、关键帧单独使用真实图片 Provider；适用于中转站文本模型 ID 尚未确认但生图端点可用的情况。
+- 图片 Provider 只发送 OpenAI 兼容协议的核心字段（`model`、`prompt`、`size`、`n`），避免部分中转站拒绝 `quality` 或 `output_format`。
 
 OpenAI 兼容中转站应填写基础地址，而不是把单个端点写入
 `LLM_BASE_URL`。例如 4sAPI：
