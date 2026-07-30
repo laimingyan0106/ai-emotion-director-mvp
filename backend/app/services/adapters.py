@@ -4,6 +4,7 @@ from typing import Any
 
 from ..config import Settings, get_settings
 from ..domain import DOMAIN_MODELS
+from .prompts import prompt_context_for_task
 from .providers import OpenAIResponsesClient
 
 
@@ -17,10 +18,11 @@ class DirectorAdapter(ABC):
         raise NotImplementedError
 
     def build_prompt(self, task: str, context: dict[str, Any]) -> str:
+        prompt_context = prompt_context_for_task(task, context)
         return (
             f"Generate the {task} asset for this confirmed directing context. "
             "Return only data that satisfies the supplied schema.\n"
-            f"CONTEXT:\n{json.dumps(context, ensure_ascii=False, default=str)}"
+            f"CONTEXT:\n{json.dumps(prompt_context, ensure_ascii=False, default=str)}"
         )
 
     def repair(
@@ -64,6 +66,48 @@ class DemoDirectorAdapter(DirectorAdapter):
             "palette": ["#17373d", "#8ca4a3", "#e4ad59", "#d8d2c2", "#071011"],
             "lighting": "大面积冷青环境光；真实记忆使用暖金点光源",
             "emotion_theme": "遗忘不是背叛，而是一种自救",
+            "immutable_rules": {
+                "world_rules": [
+                    "记忆以纸质地图保存，禁止数字化复制",
+                    "雨水会使被封存的记忆短暂显形",
+                    "城市高度随集体遗忘程度变化",
+                ],
+                "geography": [
+                    "城市漂浮于东部旧海岸线上空",
+                    "下层是被海水淹没的旧城区",
+                    "末班列车连接现实层与记忆层",
+                ],
+                "architecture": [
+                    "潮湿粗粝的混凝土站台",
+                    "细长悬索与复古有轨电车结构",
+                    "建筑轮廓避免现代玻璃幕墙",
+                ],
+                "technology": [
+                    "模拟机械优先于数字屏幕",
+                    "发光墨水用于显示记忆路径",
+                    "交通系统依赖纸质打孔票",
+                ],
+                "materials": ["旧纸纤维", "氧化铜", "湿润混凝土", "磨砂玻璃"],
+                "cinematography": {
+                    "lens_language": ["24mm 环境建立", "50mm 人物关系", "85mm 记忆特写"],
+                    "composition": ["负空间突出孤独", "轨道线条引导视线"],
+                    "camera_movement": ["克制慢推", "转折处短促手持", "结尾升空拉远"],
+                    "lighting_rules": ["环境光仅用冷青", "真实记忆使用暖金点光"],
+                },
+                "visual_exclusions": [
+                    "高饱和霓虹赛博朋克",
+                    "洁净未来主义表面",
+                    "无叙事意义的全息屏幕",
+                ],
+            },
+            "mutable_state": {
+                "weather": "持续细雨，峰值段转为短时暴雨",
+                "time_of_day": "午夜至黎明前",
+                "season": "潮湿初冬",
+                "public_mood": "克制、警觉、等待某件事发生",
+                "active_location": "潮汐城中央高架月台",
+            },
+            "locked_fields": [],
         }
 
     def _character(self, _: dict[str, Any]) -> dict[str, Any]:

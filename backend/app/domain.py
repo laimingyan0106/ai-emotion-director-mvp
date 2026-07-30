@@ -20,6 +20,44 @@ CharacterId = Annotated[str, StringConstraints(pattern=r"^CHAR-\d{3}$")]
 ShotId = Annotated[str, StringConstraints(pattern=r"^S\d{2}$")]
 
 
+class WorldCinematography(StrictDomainModel):
+    lens_language: list[str] = Field(min_length=1, max_length=12)
+    composition: list[str] = Field(min_length=1, max_length=12)
+    camera_movement: list[str] = Field(min_length=1, max_length=12)
+    lighting_rules: list[str] = Field(min_length=1, max_length=12)
+
+
+class WorldImmutableRules(StrictDomainModel):
+    world_rules: list[str] = Field(min_length=1, max_length=20)
+    geography: list[str] = Field(min_length=1, max_length=20)
+    architecture: list[str] = Field(min_length=1, max_length=20)
+    technology: list[str] = Field(min_length=1, max_length=20)
+    materials: list[str] = Field(min_length=1, max_length=20)
+    cinematography: WorldCinematography
+    visual_exclusions: list[str] = Field(min_length=1, max_length=20)
+
+
+class WorldMutableState(StrictDomainModel):
+    weather: str = Field(min_length=1, max_length=160)
+    time_of_day: str = Field(min_length=1, max_length=120)
+    season: str = Field(min_length=1, max_length=120)
+    public_mood: str = Field(min_length=1, max_length=240)
+    active_location: str = Field(min_length=1, max_length=240)
+
+
+WorldLockPath = Annotated[
+    str,
+    StringConstraints(
+        pattern=(
+            r"^(name|era|location|culture|visual_style|palette|lighting|"
+            r"emotion_theme|immutable_rules\.(world_rules|geography|architecture|"
+            r"technology|materials|cinematography|visual_exclusions)|"
+            r"mutable_state\.(weather|time_of_day|season|public_mood|active_location))$"
+        )
+    ),
+]
+
+
 class WorldAsset(StrictDomainModel):
     name: str = Field(min_length=1, max_length=120)
     era: str = Field(min_length=1, max_length=240)
@@ -29,6 +67,9 @@ class WorldAsset(StrictDomainModel):
     palette: list[HexColor] = Field(min_length=3, max_length=8)
     lighting: str = Field(min_length=1, max_length=500)
     emotion_theme: str = Field(min_length=1, max_length=500)
+    immutable_rules: WorldImmutableRules
+    mutable_state: WorldMutableState
+    locked_fields: list[WorldLockPath] = Field(default_factory=list, max_length=32)
 
 
 class CharacterAsset(StrictDomainModel):

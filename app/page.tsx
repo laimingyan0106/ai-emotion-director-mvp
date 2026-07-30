@@ -3,10 +3,12 @@
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  AssetVersion,
   analyzeAudio,
   checkHealth,
   confirmSegment,
   createProject,
+  createWorld,
   deleteProject,
   fetchProject,
   fetchProjects,
@@ -16,6 +18,7 @@ import {
   ProjectSnapshot,
   SegmentCandidate,
   updateProject,
+  updateWorld,
   uploadAudio,
 } from "../lib/api-client";
 
@@ -231,6 +234,12 @@ export default function Home() {
   const [energyCurve, setEnergyCurve] = useState<number[]>(curve);
   const [segmentBusy, setSegmentBusy] = useState(false);
   const [segmentConfirmed, setSegmentConfirmed] = useState(false);
+  const [worldAsset, setWorldAsset] = useState<AssetVersion | null>(null);
+  const [worldNameDraft, setWorldNameDraft] = useState("");
+  const [worldStyleDraft, setWorldStyleDraft] = useState("");
+  const [worldWeatherDraft, setWorldWeatherDraft] = useState("");
+  const [worldLockedFields, setWorldLockedFields] = useState<string[]>([]);
+  const [worldBusy, setWorldBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const lastSavedName = useRef(projectName);
 
@@ -263,6 +272,8 @@ export default function Home() {
       }
     };
     void connect();
+    // Initial deep-link restoration intentionally runs once for the URL at mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -338,6 +349,8 @@ export default function Home() {
     const versions = await fetchAssetVersions(projectId);
     const activeSegment = versions.groups.segment?.find((asset) => asset.is_active);
     const activeAnalysis = versions.groups.audio_analysis?.find((asset) => asset.is_active);
+    const activeWorld = versions.groups.world?.find((asset) => asset.is_active) ?? null;
+    hydrateWorld(activeWorld);
     if (activeAnalysis) {
       const values = activeAnalysis.payload.energy_curve;
       if (Array.isArray(values)) {
@@ -369,6 +382,77 @@ export default function Home() {
       setSegmentConfirmed(false);
       setStage("idle");
       setProgress(0);
+    }
+  }
+
+  function hydrateWorld(asset: AssetVersion | null) {
+    setWorldAsset(asset);
+    const payload = asset?.payload;
+    const mutableState = payload?.mutable_state;
+    setWorldNameDraft(String(payload?.name || ""));
+    setWorldStyleDraft(String(payload?.visual_style || ""));
+    setWorldWeatherDraft(
+      mutableState && typeof mutableState === "object"
+        ? String((mutableState as Record<string, unknown>).weather || "")
+        : "",
+    );
+    setWorldLockedFields(
+      Array.isArray(payload?.locked_fields)
+        ? payload.locked_fields.map((value) => String(value))
+        : [],
+    );
+  }
+
+  function toggleWorldLock(path: string) {
+    setWorldLockedFields((current) =>
+      current.includes(path)
+        ? current.filter((item) => item !== path)
+        : [...current, path],
+    );
+  }
+
+  async function regenerateWorld() {
+    if (!apiProjectId || !segmentConfirmed) {
+      showToast("请先完成音频分析并确认 30 秒片段");
+      return;
+    }
+    setWorldBusy(true);
+    setApiError("");
+    try {
+      await createWorld(apiProjectId);
+      await restoreProjectSegment(apiProjectId);
+      showToast(worldAsset ? "World 已重新生成，锁定字段保持不变" : "World Bible 已生成");
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "World 生成失败。");
+    } finally {
+      setWorldBusy(false);
+    }
+  }
+
+  async function saveWorldStudio() {
+    if (!apiProjectId || !worldAsset) return;
+    setWorldBusy(true);
+    setApiError("");
+    const changes: Record<string, unknown> = {};
+    if (!worldLockedFields.includes("name")) changes.name = worldNameDraft;
+    if (!worldLockedFields.includes("visual_style")) changes.visual_style = worldStyleDraft;
+    if (!worldLockedFields.includes("mutable_state.weather")) {
+      changes.mutable_state = { weather: worldWeatherDraft };
+    }
+    try {
+      const result = await updateWorld(apiProjectId, {
+        expected_version: worldAsset.version,
+        changes,
+        locked_fields: worldLockedFields,
+      });
+      hydrateWorld(result.asset);
+      showToast(result.warnings.length
+        ? `World v${result.asset.version} 已保存，${result.warnings.length} 个下游资产需重新生成`
+        : `World v${result.asset.version} 已保存`);
+    } catch (error) {
+      setApiError(error instanceof ApiError ? error.message : "World 保存失败。");
+    } finally {
+      setWorldBusy(false);
     }
   }
 
@@ -794,36 +878,85 @@ export default function Home() {
 
         {view === "world" && (
           <div className="page studio-page">
-            <PageHeading overline="WORLD BIBLE / 02" title="潮汐之上的城" subtitle="每一条视觉决策，都来自同一个可复用的世界规则。" ready={isReady} />
+            <PageHeading
+              overline={`WORLD BIBLE / 02${worldAsset ? ` · V${worldAsset.version}` : ""}`}
+              title={worldNameDraft || "等待生成世界观"}
+              subtitle="稳定规则与可变状态分别管理；锁定字段在重新生成时保持不变。"
+              ready={isReady}
+            />
+            {!worldAsset ? (
+              <section className="panel world-empty">
+                <span>STRUCTURED WORLD</span>
+                <h3>从已确认的 30 秒音乐片段生成 World Bible</h3>
+                <p>输出世界规则、地理、建筑、科技、材质、摄影系统、视觉禁区和当前环境状态。</p>
+                <button className="primary-button" disabled={worldBusy || !segmentConfirmed} onClick={() => void regenerateWorld()}>
+                  {worldBusy ? "生成中…" : "生成 World Bible"}
+                </button>
+              </section>
+            ) : (
             <div className="studio-grid">
               <section className="world-hero panel">
-                <div className="world-orbit"><span>潮汐城</span><i /><b /></div>
+                <div className="world-orbit"><span>{worldNameDraft}</span><i /><b /></div>
                 <div className="world-copy">
-                  <Badge tone="gold">诗性复古未来主义</Badge>
-                  <h3>漂浮在旧海岸线之上，<br />靠人类遗忘维持升力。</h3>
-                  <p>雨是记忆回流的物理现象。城市每晚降低高度，只有末班列车能穿过被封存的记忆层。</p>
+                  <Badge tone="gold">{worldStyleDraft}</Badge>
+                  <h3>{String(worldAsset.payload.location || "")}</h3>
+                  <p>{String(worldAsset.payload.emotion_theme || "")}</p>
                 </div>
               </section>
-              <section className="panel field-list">
-                <Field label="时代" value="近未来 · 记忆工业衰退期" />
-                <Field label="地点" value="东部旧海岸 · 悬浮雨城" />
-                <Field label="文化" value="以纸质地图保存私人记忆" />
-                <Field label="情绪母题" value="遗忘不是背叛，而是一种自救" />
+              <section className="panel world-editor">
+                <div className="panel-title"><span>WORLD STUDIO</span><strong>字段编辑与锁定</strong></div>
+                {[
+                  ["世界名称", "name", worldNameDraft, setWorldNameDraft],
+                  ["视觉风格", "visual_style", worldStyleDraft, setWorldStyleDraft],
+                  ["当前天气", "mutable_state.weather", worldWeatherDraft, setWorldWeatherDraft],
+                ].map(([label, path, value, setter]) => {
+                  const locked = worldLockedFields.includes(path as string);
+                  return (
+                    <label className="world-edit-row" key={path as string}>
+                      <span>{label as string}</span>
+                      <input
+                        aria-label={label as string}
+                        value={value as string}
+                        disabled={locked || worldBusy}
+                        onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className={locked ? "world-lock active" : "world-lock"}
+                        aria-pressed={locked}
+                        onClick={() => toggleWorldLock(path as string)}
+                      >
+                        {locked ? "已锁定" : "锁定"}
+                      </button>
+                    </label>
+                  );
+                })}
+                <div className="world-editor-actions">
+                  <button className="primary-button" disabled={worldBusy} onClick={() => void saveWorldStudio()}>
+                    {worldBusy ? "处理中…" : "保存为新版本"}
+                  </button>
+                  <button className="ghost-button" disabled={worldBusy} onClick={() => void regenerateWorld()}>
+                    重新生成
+                  </button>
+                </div>
+              </section>
+              <section className="panel field-list world-rules">
+                <Field label="时代" value={String(worldAsset.payload.era || "")} />
+                <Field label="地点" value={String(worldAsset.payload.location || "")} />
+                <Field label="文化" value={String(worldAsset.payload.culture || "")} />
+                <Field label="当前天气" value={worldWeatherDraft} />
               </section>
               <section className="panel palette-panel">
                 <div className="panel-title"><span>VISUAL SYSTEM</span><strong>色彩与灯光</strong></div>
                 <div className="swatches">
-                  {[
-                    ["午夜青", "#17373d"],
-                    ["雨银", "#8ca4a3"],
-                    ["记忆金", "#e4ad59"],
-                    ["旧纸白", "#d8d2c2"],
-                    ["深海黑", "#071011"],
-                  ].map(([name, color]) => <div key={name}><i style={{ background: color }} /><span>{name}</span><small>{color}</small></div>)}
+                  {(Array.isArray(worldAsset.payload.palette) ? worldAsset.payload.palette : []).map((color, index) => (
+                    <div key={String(color)}><i style={{ background: String(color) }} /><span>色彩 {index + 1}</span><small>{String(color)}</small></div>
+                  ))}
                 </div>
-                <p>主光为大面积冷青环境光；只有与真实记忆有关的物体允许出现暖金色点光源。</p>
+                <p>{String(worldAsset.payload.lighting || "")}</p>
               </section>
             </div>
+            )}
           </div>
         )}
 

@@ -45,6 +45,8 @@ from .schemas import (
     SegmentConfirmationResponse,
     SegmentRecommendationsResponse,
     UploadResponse,
+    WorldUpdateRequest,
+    WorldUpdateResponse,
 )
 from .services.adapters import get_director_adapter
 from .services.audio import analyze_audio_file, demo_analysis
@@ -57,6 +59,11 @@ from .services.segments import (
     validate_confirmed_segment,
 )
 from .services.storage import get_media_storage
+from .services.world import (
+    WorldEditError,
+    edit_world,
+    preserve_locked_world_fields,
+)
 
 settings = get_settings()
 adapter = get_director_adapter()
@@ -257,7 +264,8 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
         context = restrict_context_to_confirmed_segment(context)
     except SegmentSelectionError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    input_snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
+    current_same_kind = context.get("assets", {}).get(kind)
+    input_snapshot = generation_input_snapshot(project_id, kind)
     prompt = adapter.build_prompt(kind, context)
     try:
         generation = generate_validated_asset(
@@ -317,6 +325,11 @@ def create_asset(project_id: UUID, kind: str) -> PipelineAsset:
             },
         ) from error
     result = generation.model.model_dump(mode="json")
+    if kind == "world" and isinstance(current_same_kind, dict):
+        result = preserve_locked_world_fields(
+            current_same_kind,
+            result,
+        ).model_dump(mode="json")
     asset = insert_asset_version(
         project_id,
         kind,
@@ -344,6 +357,24 @@ def load_context(project_id: UUID) -> dict:
     if not context:
         raise HTTPException(status_code=404, detail="Project not found")
     return context
+
+
+def generation_input_snapshot(
+    project_id: UUID,
+    kind: str,
+) -> dict[str, dict[str, int]]:
+    dependencies = {
+        "world": {"audio_analysis", "segment"},
+        "character": {"audio_analysis", "segment", "world"},
+        "story": {"audio_analysis", "segment", "world", "character"},
+        "shots": {"audio_analysis", "segment", "world", "character", "story"},
+    }
+    snapshot = get_active_asset_snapshot(project_id, exclude_kind=kind)
+    return {
+        asset_kind: reference
+        for asset_kind, reference in snapshot.items()
+        if asset_kind in dependencies.get(kind, set())
+    }
 
 
 @app.get("/projects/{project_id}/assets", response_model=AssetVersionsResponse)
@@ -474,6 +505,57 @@ def confirm_project_segment(
         input_snapshot={"audio_analysis": snapshot["audio_analysis"]},
     )
     return SegmentConfirmationResponse(
+        asset=AssetVersion.model_validate(asset),
+        warnings=get_asset_dependency_warnings(project_id),
+    )
+
+
+@app.patch(
+    "/projects/{project_id}/world",
+    response_model=WorldUpdateResponse,
+)
+def update_project_world(
+    project_id: UUID,
+    payload: WorldUpdateRequest,
+) -> WorldUpdateResponse:
+    current = next(
+        (
+            asset
+            for asset in list_asset_versions(project_id, "world")
+            if asset["is_active"]
+        ),
+        None,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Active World not found")
+    if int(current["version"]) != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "World version conflict",
+                "expected_version": payload.expected_version,
+                "active_version": current["version"],
+            },
+        )
+    try:
+        edited = edit_world(
+            current["payload"],
+            changes=payload.changes,
+            locked_fields=payload.locked_fields,
+        )
+    except (WorldEditError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    asset = insert_asset_version(
+        project_id,
+        "world",
+        edited.model_dump(mode="json"),
+        activate=True,
+        provider="user",
+        model="world-studio",
+        prompt="Manual structured World Studio edit",
+        input_snapshot=generation_input_snapshot(project_id, "world"),
+    )
+    return WorldUpdateResponse(
         asset=AssetVersion.model_validate(asset),
         warnings=get_asset_dependency_warnings(project_id),
     )

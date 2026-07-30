@@ -284,3 +284,31 @@ docker compose up --build
   - Provider 最终失败返回 502、记录 failed 版本且旧 active 不变 PASS
   - 未发现可用真实 API 密钥，因此没有执行付费真实 Provider smoke test；此边界已明确保留
 - 下一任务：`V11-T009`，扩展 World Bible v1.1 的视觉、声音、地点与负面约束体系。
+
+### V11-T009：World Bible v1.1
+
+- 状态：完成
+- 结构化 Schema：
+  - `immutable_rules` 独立保存世界规则、地理、建筑、科技、材质、摄影系统与视觉禁区
+  - `mutable_state` 独立保存天气、时段、季节、公共情绪与当前地点
+  - 禁止额外字段并限制列表长度，避免 World Bible 退化成长篇无结构散文
+- 编辑、锁定与版本：
+  - 新增 `PATCH /projects/{project_id}/world`，使用 `expected_version` 做乐观并发校验
+  - World Studio 支持世界名称、视觉风格、当前天气编辑，保存时生成新的激活版本
+  - 字段可锁定；重新生成 World 时从当前激活版本恢复锁定值
+  - 修改 World 后返回 Character/Story/Shots 的依赖失效警告
+- Prompt 上下文：
+  - 生成任务按依赖图保存最小 `input_snapshot`
+  - Shots 只注入 World 中与镜头相关的地理、建筑、材质、摄影、灯光、视觉禁区及当前拍摄状态
+  - 不向 Shots Prompt 注入文化、情绪母题等无关长文本
+  - Shots 的 `input_snapshot.world` 明确记录引用的 asset_id/version
+- 前端：
+  - 无 World 时可从已确认片段首次生成
+  - 显示当前 World 版本号、动态世界信息与真实色板
+  - 支持编辑、锁定、保存为新版本和重新生成
+- 验证结果：
+  - 后端 26/26 测试 PASS
+  - World Schema、锁定字段再生成、Shots Prompt 最小上下文测试 PASS
+  - API 编辑、版本冲突、再生成保锁与镜头 World 版本引用测试 PASS
+  - Next/Vinext 构建、TypeScript 与 ESLint PASS
+- 下一任务：`V11-T010`。

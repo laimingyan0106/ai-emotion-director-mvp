@@ -148,6 +148,21 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 .swatches span { font-size: 11px; }
 .swatches small { color: var(--muted); font: 8px "Courier New", monospace; }
 .palette-panel > p { color: var(--muted); font-size: 12px; margin: 22px 0 0; }
+.world-empty { max-width: 760px; display: grid; gap: 15px; }
+.world-empty > span { color: var(--gold); font: 9px "Courier New", monospace; letter-spacing: .14em; }
+.world-empty h3 { margin: 0; font: 26px STSong, SimSun, serif; }
+.world-empty p { color: var(--muted); line-height: 1.8; margin: 0; }
+.world-empty .primary-button { justify-self: start; }
+.world-editor { display: grid; align-content: start; gap: 14px; }
+.world-edit-row { display: grid; grid-template-columns: 86px 1fr 58px; gap: 9px; align-items: center; }
+.world-edit-row > span { color: var(--muted); font-size: 10px; }
+.world-edit-row input { min-width: 0; padding: 10px 11px; border: 1px solid var(--line); background: rgba(0,0,0,.22); color: var(--ink); outline: none; }
+.world-edit-row input:focus { border-color: var(--gold); }
+.world-edit-row input:disabled { opacity: .55; }
+.world-lock { padding: 9px 7px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
+.world-lock.active { border-color: var(--gold); color: var(--gold); background: rgba(239,189,101,.07); }
+.world-editor-actions { display: flex; gap: 9px; margin-top: 5px; }
+.world-rules { grid-column: 1 / 2; }
 
 .character-layout { display: grid; grid-template-columns: .75fr 1.25fr; gap: 14px; }
 .character-portrait { grid-row: span 2; }

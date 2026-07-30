@@ -117,6 +117,17 @@ class SegmentConfirmationResponse(BaseModel):
     warnings: list[AssetDependencyWarning] = Field(default_factory=list)
 
 
+class WorldUpdateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    changes: dict[str, Any] = Field(default_factory=dict)
+    locked_fields: list[str] | None = None
+
+
+class WorldUpdateResponse(BaseModel):
+    asset: AssetVersion
+    warnings: list[AssetDependencyWarning] = Field(default_factory=list)
+
+
 class ProjectResponse(BaseModel):
     id: UUID
     name: str

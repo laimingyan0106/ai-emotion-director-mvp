@@ -27,7 +27,7 @@ from app.database import (  # noqa: E402
     load_project_context,
     save_audio_record,
 )
-from app.services.adapters import DirectorAdapter  # noqa: E402
+from app.services.adapters import DemoDirectorAdapter, DirectorAdapter  # noqa: E402
 from app.services.audio import demo_analysis  # noqa: E402
 from app.services.segments import restrict_context_to_confirmed_segment  # noqa: E402
 from app.services.providers import ProviderRequestError  # noqa: E402
@@ -48,6 +48,18 @@ class FailingProviderAdapter(DirectorAdapter):
             status_code=429,
             retryable=True,
         )
+
+
+class ChangingWorldAdapter(DirectorAdapter):
+    provider_name = "mock-provider"
+    model_name = "mock-world-model"
+
+    def generate(self, task, context):
+        payload = DemoDirectorAdapter().generate(task, context)
+        if task == "world":
+            payload["name"] = "重新生成的世界"
+            payload["mutable_state"]["weather"] = "晴朗无雨"
+        return payload
 
 
 def sine_wav_bytes(duration: float = 1.0, sample_rate: int = 22050) -> bytes:
@@ -406,6 +418,110 @@ class ApiIntegrationTest(unittest.TestCase):
             self.assertEqual(failed["model"], "mock-model")
             self.assertTrue(failed["prompt"])
             self.assertEqual(failed["validation_errors"][0]["status_code"], 429)
+
+    def test_world_edit_lock_and_regenerate_preserve_locked_fields(self):
+        with TestClient(app) as client:
+            project_id = client.post(
+                "/project/create",
+                json={"name": "World Studio locks"},
+            ).json()["id"]
+            seed_confirmed_segment(project_id)
+            first = client.post(
+                "/world/create",
+                json={"project_id": project_id},
+            ).json()
+
+            edited = client.patch(
+                f"/projects/{project_id}/world",
+                json={
+                    "expected_version": first["version"],
+                    "changes": {
+                        "mutable_state": {"weather": "锁定的持续暴雨"},
+                    },
+                },
+            )
+            self.assertEqual(edited.status_code, 200)
+            locked = client.patch(
+                f"/projects/{project_id}/world",
+                json={
+                    "expected_version": edited.json()["asset"]["version"],
+                    "changes": {},
+                    "locked_fields": ["mutable_state.weather"],
+                },
+            )
+            self.assertEqual(locked.status_code, 200)
+
+            blocked_edit = client.patch(
+                f"/projects/{project_id}/world",
+                json={
+                    "expected_version": locked.json()["asset"]["version"],
+                    "changes": {
+                        "mutable_state": {"weather": "不应被写入"},
+                    },
+                    "locked_fields": ["mutable_state.weather"],
+                },
+            )
+            self.assertEqual(blocked_edit.status_code, 422)
+
+            original_adapter = main_module.adapter
+            main_module.adapter = ChangingWorldAdapter()
+            try:
+                regenerated = client.post(
+                    "/world/create",
+                    json={"project_id": project_id},
+                )
+            finally:
+                main_module.adapter = original_adapter
+            self.assertEqual(regenerated.status_code, 200)
+            regenerated_payload = regenerated.json()["payload"]
+            self.assertEqual(regenerated_payload["name"], "重新生成的世界")
+            self.assertEqual(
+                regenerated_payload["mutable_state"]["weather"],
+                "锁定的持续暴雨",
+            )
+            self.assertEqual(
+                regenerated_payload["locked_fields"],
+                ["mutable_state.weather"],
+            )
+
+            conflict = client.patch(
+                f"/projects/{project_id}/world",
+                json={"expected_version": 1, "changes": {"name": "过期编辑"}},
+            )
+            self.assertEqual(conflict.status_code, 409)
+
+            character = client.post(
+                "/character/create",
+                json={"project_id": project_id},
+            )
+            story = client.post(
+                "/story/create",
+                json={"project_id": project_id},
+            )
+            shots_response = client.post(
+                "/shots/create",
+                json={"project_id": project_id},
+            )
+            self.assertEqual(character.status_code, 200)
+            self.assertEqual(story.status_code, 200)
+            self.assertEqual(shots_response.status_code, 200)
+            shots_asset = next(
+                asset
+                for asset in list_asset_versions(UUID(project_id), "shots")
+                if asset["is_active"]
+            )
+            active_world = next(
+                asset
+                for asset in list_asset_versions(UUID(project_id), "world")
+                if asset["is_active"]
+            )
+            self.assertEqual(
+                shots_asset["input_snapshot"]["world"],
+                {
+                    "asset_id": active_world["id"],
+                    "version": active_world["version"],
+                },
+            )
 
     def test_segment_recommend_confirm_bounds_and_dependency_invalidation(self):
         with TestClient(app) as client:

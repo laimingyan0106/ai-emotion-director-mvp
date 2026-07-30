@@ -38,3 +38,16 @@ test("starter preview has been removed", async () => {
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.match(page, /shots\.length \* 3/);
 });
+
+test("World Studio exposes structured versioned editing controls", async () => {
+  const [page, client] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("lib/api-client.ts", root), "utf8"),
+  ]);
+  assert.match(page, /WORLD STUDIO/);
+  assert.match(page, /保存为新版本/);
+  assert.match(page, /mutable_state\.weather/);
+  assert.match(page, /重新生成/);
+  assert.match(client, /export function updateWorld/);
+  assert.match(client, /expected_version/);
+});

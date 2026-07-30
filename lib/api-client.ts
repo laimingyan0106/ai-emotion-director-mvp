@@ -242,3 +242,34 @@ export function confirmSegment(
     },
   );
 }
+
+export function createWorld(projectId: string): Promise<{
+  project_id: string;
+  kind: "world";
+  payload: Record<string, unknown>;
+  asset_id: number;
+  version: number;
+  status: string;
+  is_active: boolean;
+}> {
+  return request("/world/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
+export function updateWorld(
+  projectId: string,
+  values: {
+    expected_version: number;
+    changes: Record<string, unknown>;
+    locked_fields: string[];
+  },
+): Promise<{ asset: AssetVersion; warnings: AssetDependencyWarning[] }> {
+  return request(`/projects/${encodeURIComponent(projectId)}/world`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}

@@ -35,6 +35,7 @@ docker compose up --build
 - `POST /projects/{project_id}/assets/{kind}/activate`
 - `GET /projects/{project_id}/segments/recommendations`
 - `POST /projects/{project_id}/segments/confirm`
+- `PATCH /projects/{project_id}/world`
 - `POST /project/create`
 - `POST /audio/upload`
 - `POST /audio/analyze`
@@ -56,6 +57,7 @@ docker compose up --build
 - 音频分析使用 librosa 与 FFmpeg 提取节拍、起音、RMS、频谱质心、chroma、能量曲线、静音段和峰值候选；失败会明确标记 `degraded`，不会把这些信号宣称为心理学情绪识别。
 - 音频分析后提供高潮、叙事转折、平稳三类 30 秒候选；用户可拖动起止点并显式确认，未确认片段时 World/Character/Story/Shots API 返回 409。
 - `ADAPTER_MODE=provider` 且配置 `LLM_API_KEY`/`OPENAI_API_KEY` 时使用 OpenAI Responses API；模型默认 `gpt-5.6-terra` 并可由 `LLM_MODEL` 覆盖。缺少密钥或 Provider 不支持时自动回落完整 Demo，并在 `/health` 的实际 adapter 与 fallback reason 中明确显示。
+- World Bible v1.1 将稳定规则与可变状态分开保存；World Studio 支持结构化字段编辑、字段锁定和重新生成，锁定值不会在再生成时漂移，镜头资产会记录明确的 World asset/version 输入快照。
 - 导演台提供云端项目列表、项目详情加载、名称自动保存和带确认的级联删除。
 - 当前公开前端由已验证的 vinext 构建产物预渲染为静态 Vercel 部署；源码和 Sites 版本仍保留完整 vinext/Cloudflare Worker 架构。
 
