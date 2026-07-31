@@ -460,3 +460,25 @@ docker compose up --build
   - API Key 仅保存在 Vercel Production 加密环境变量中，未写入仓库或日志
   - 4sAPI 分组错误、模型通道错误与超时均以脱敏信息记录
   - GitHub、Vercel API 与公开 Codex 分析站同步到本验收版本
+
+### V11-T014：公开 Sites 真实 API 链路修复
+
+- 状态：完成
+- 根因：
+  - Sites 版本 10 的本地生产构建没有注入 `NEXT_PUBLIC_API_BASE_URL`
+  - 浏览器因此进入 Demo Adapter；Demo 只跳转世界观页面，没有创建真实 World 资产
+  - 生产 API 日志中没有用户新歌曲对应的上传、分析或 `/world/create` 请求
+- 修复：
+  - Vinext/Sites 生产构建缺少显式配置时，使用非敏感的生产 API 默认地址
+  - 保留环境变量覆盖能力，不影响预览或其他部署目标
+  - 新增构建产物回归测试，确保最终浏览器 JavaScript 包含真实生产 API 地址
+  - 首页 SSR 预期从 `Demo Adapter` 更新为 `API 连接中`
+- 验证：
+  - 前端 9/9、ESLint、Vinext 构建通过
+  - 后端 43/43 通过
+  - 公开 Sites 版本 11 部署成功，HTTP 200，浏览器确认显示 `Real API`
+  - 新验收项目 `be1e3e51-b946-4f4a-8f9a-dc883d658f63`
+  - 新上传 36 秒 WAV，`librosa-v1` 真实分析成功
+  - 确认 3–33 秒 highlight 片段，Segment 资产 90
+  - `/world/create` 返回 200，World 资产 91、v1、active
+  - 世界观名称“潮汐之上的城”，不再停留在“等待生成世界观”
