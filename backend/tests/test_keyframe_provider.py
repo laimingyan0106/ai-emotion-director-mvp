@@ -142,6 +142,9 @@ class KeyframeProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sk-secret", message)
         self.assertNotIn("topsecret", message)
 
+    def test_sanitizer_keeps_exception_type_for_empty_timeout_message(self):
+        self.assertEqual(sanitize_provider_error(httpx.ReadTimeout("")), "ReadTimeout")
+
     def test_image_url_rejects_private_network_targets(self):
         with self.assertRaises(ValueError):
             _validated_remote_image_url("http://127.0.0.1/frame.png")

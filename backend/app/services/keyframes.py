@@ -282,7 +282,7 @@ def source_snapshot(
 
 
 def sanitize_provider_error(error: Exception) -> str:
-    message = str(error)
+    message = str(error) or error.__class__.__name__
     message = re.sub(r"(?i)(api[_ -]?key|authorization|bearer)\s*[:= ]+\S+", r"\1=[REDACTED]", message)
     message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", message)
     return message[:1000] or "Keyframe provider failed"
