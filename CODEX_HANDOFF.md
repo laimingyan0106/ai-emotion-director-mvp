@@ -436,3 +436,27 @@ docker compose up --build
   - 生产 UI 恢复 KeyframeSet v4，显示 100%、10/10、provider task id、确认锁和三类下载入口
   - 临时项目、音频、关键帧与本地验收下载均已清理
 - 下一任务：`V11-T013`，完成全链路 E2E、结构化日志、脱敏、安全扫描、Provider 验收、部署文档与剪映小助手成片交付。
+
+### V11-T013：真实 Provider 与剪映交接包最终验收
+
+- 状态：完成
+- 生产 Provider：
+  - 4sAPI OpenAI 兼容端点 `https://4sapi.com/v1`
+  - 导演文本保持确定性 Demo，关键帧独立启用真实 Provider
+  - 图片模型 `gpt-image-2`，单图超时 280 秒
+  - 生产健康检查确认 `keyframe_provider=openai`、`image_key_shape_valid=true`
+- 真实生图验收：
+  - 生产项目 `b88a4d68-7edb-4c47-b7a0-7915bc7a64cf`
+  - S01-S10 全部 `succeeded`，Provider 全部为 `openai`
+  - 10 张均为有效 PNG，尺寸 1024×1024，PNG 文件头与 SHA-256 逐张校验通过
+  - 真实单张耗时约 196 秒；剩余 9 张并发批次约 288 秒完成
+- 剪映小助手交接包：
+  - 本地验收文件 `work/jianying-provider-acceptance.zip`
+  - ZIP 大小 22,479,296 字节
+  - ZIP SHA-256 `cb12598f5fae3d80ef5b30ce061748244d18ae2b355ceee01756a2dbc1c3a1f8`
+  - CRC 校验通过，共 14 项：原音频、10 张关键帧、`timeline.json`、`keyframes-manifest.json`、`剪映小助手提示词.txt`
+  - 时间线 10 镜头；清单 10 个任务均为 `gpt-image-2/openai/succeeded`；提示词 920 字
+- 发布与安全：
+  - API Key 仅保存在 Vercel Production 加密环境变量中，未写入仓库或日志
+  - 4sAPI 分组错误、模型通道错误与超时均以脱敏信息记录
+  - GitHub、Vercel API 与公开 Codex 分析站同步到本验收版本
