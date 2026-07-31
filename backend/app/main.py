@@ -137,6 +137,7 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str | bool | None]:
+    image_key = settings.resolved_image_api_key or ""
     return {
         "status": "ok",
         "adapter": adapter.provider_name,
@@ -150,6 +151,9 @@ def health() -> dict[str, str | bool | None]:
         "keyframe_model": keyframe_image_adapter.model,
         "keyframe_fallback_reason": keyframe_image_adapter.fallback_reason,
         "keyframe_adapter_configured": settings.resolved_image_adapter_mode,
+        "image_key_shape_valid": (
+            image_key.startswith("sk-") and len(image_key) >= 20
+        ),
     }
 
 
