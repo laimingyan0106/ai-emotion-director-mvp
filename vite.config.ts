@@ -5,6 +5,8 @@ import { sites } from "./build/sites-vite-plugin";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
+const DEFAULT_PRODUCTION_API_BASE_URL =
+  "https://ai-emotion-director-api.vercel.app";
 
 const { d1, r2 } = hostingConfig;
 
@@ -33,7 +35,18 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ command }) => {
+  // Sites builds happen locally before the archive is uploaded, so runtime
+  // environment variables cannot retroactively configure this public client
+  // value. Keep an explicit, non-secret production default for reproducible
+  // public builds while still allowing previews to override it.
+  if (
+    command === "build" &&
+    !process.env.NEXT_PUBLIC_API_BASE_URL?.trim()
+  ) {
+    process.env.NEXT_PUBLIC_API_BASE_URL = DEFAULT_PRODUCTION_API_BASE_URL;
+  }
+
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";

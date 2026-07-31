@@ -22,7 +22,7 @@ test("server-renders the emotion director product", async () => {
   assert.match(html, /AI 情绪导演/);
   assert.match(html, /把一首歌/);
   assert.match(html, /导演生成链路/);
-  assert.match(html, /Demo Adapter/);
+  assert.match(html, /API 连接中/);
   assert.doesNotMatch(html, /codex-preview/);
 });
 
