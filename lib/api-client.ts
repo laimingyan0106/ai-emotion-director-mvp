@@ -130,6 +130,14 @@ export class ApiError extends Error {
 }
 
 const configuredBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const AUDIO_UPLOAD_TIMEOUT_MS = 180_000;
+const AUDIO_ANALYSIS_TIMEOUT_MS = 120_000;
+const IMAGE_GENERATION_TIMEOUT_MS = 360_000;
+
+type RequestOptions = RequestInit & {
+  timeoutMs?: number;
+};
 
 export function getApiMode(): ApiMode {
   return configuredBaseUrl ? "real" : "demo";
@@ -139,19 +147,31 @@ export function apiAssetUrl(path: string): string {
   return configuredBaseUrl ? `${configuredBaseUrl}${path}` : "";
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   if (!configuredBaseUrl) {
     throw new ApiError("未配置 API 地址，当前使用 Demo 模式。");
   }
 
+  const {
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    ...requestInit
+  } = init ?? {};
   let response: Response;
   try {
     response = await fetch(`${configuredBaseUrl}${path}`, {
-      ...init,
-      signal: init?.signal ?? AbortSignal.timeout(15_000),
+      ...requestInit,
+      signal: requestInit.signal ?? AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "unknown network error";
+    if (
+      (error instanceof Error && error.name === "TimeoutError") ||
+      detail.toLowerCase().includes("signal timed out")
+    ) {
+      throw new ApiError(
+        `导演 API 处理超过 ${Math.ceil(timeoutMs / 1000)} 秒，请稍后重试；任务可能仍在服务端完成。`,
+      );
+    }
     throw new ApiError(`无法连接导演 API，请检查网络或稍后重试（${detail}）。`);
   }
 
@@ -188,7 +208,11 @@ export function uploadAudio(projectId: string, file: File): Promise<UploadRespon
   const form = new FormData();
   form.append("project_id", projectId);
   form.append("audio", file);
-  return request<UploadResponse>("/audio/upload", { method: "POST", body: form });
+  return request<UploadResponse>("/audio/upload", {
+    method: "POST",
+    body: form,
+    timeoutMs: AUDIO_UPLOAD_TIMEOUT_MS,
+  });
 }
 
 export function analyzeAudio(projectId: string): Promise<{
@@ -204,6 +228,7 @@ export function analyzeAudio(projectId: string): Promise<{
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ project_id: projectId }),
+    timeoutMs: AUDIO_ANALYSIS_TIMEOUT_MS,
   });
 }
 
@@ -339,6 +364,7 @@ export function generateCharacterReferences(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ expected_version: expectedVersion }),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 }
 
@@ -445,6 +471,7 @@ export function startKeyframes(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ expected_shots_version: expectedShotsVersion }),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 }
 
@@ -459,6 +486,7 @@ export function retryKeyframe(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expected_version: expectedVersion }),
+      timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
     },
   );
 }
@@ -471,6 +499,7 @@ export function retryFailedKeyframes(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ expected_version: expectedVersion }),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 }
 
