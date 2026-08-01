@@ -8,9 +8,10 @@ from pathlib import Path
 import tempfile
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
+from psycopg import OperationalError
 
 from .config import get_settings
 from .domain import (
@@ -135,6 +136,24 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(OperationalError)
+async def database_connection_error(
+    request: Request,
+    error: OperationalError,
+) -> JSONResponse:
+    log_event(
+        "database_connection_error",
+        method=request.method,
+        path=request.url.path,
+        error=public_error(error, "database connection unavailable"),
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "数据库连接暂时中断，服务正在自动重连，请重试。"},
+        headers={"Retry-After": "1"},
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str | bool | None]:
     image_key = settings.resolved_image_api_key or ""
@@ -175,7 +194,7 @@ def get_project(project_id: UUID) -> ProjectSnapshot:
 @app.get("/projects", response_model=ProjectListResponse)
 def list_projects() -> ProjectListResponse:
     items = [
-        ProjectSnapshot.model_validate(get_project_record(project["id"]) or project)
+        ProjectSnapshot.model_validate(project)
         for project in list_project_records()
     ]
     return ProjectListResponse(items=items, total=len(items))

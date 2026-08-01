@@ -71,9 +71,13 @@ class Database:
     def __init__(self, database_url: str | None = None) -> None:
         self.pool = ConnectionPool(
             conninfo=database_url or get_settings().database_url,
-            min_size=1,
+            min_size=0,
             max_size=8,
             kwargs={"row_factory": dict_row},
+            check=ConnectionPool.check_connection,
+            max_idle=60.0,
+            max_lifetime=300.0,
+            reconnect_timeout=15.0,
             open=False,
         )
 
@@ -343,18 +347,64 @@ def list_project_records() -> list[dict[str, Any]]:
         if isinstance(database, SqliteDatabase):
             rows = connection.execute(
                 """
-                SELECT * FROM projects
-                ORDER BY updated_at DESC, created_at DESC
+                SELECT
+                  project.*,
+                  audio.id AS audio_id,
+                  audio.filename AS audio_filename,
+                  audio.content_type AS audio_content_type,
+                  audio.size_bytes AS audio_size_bytes
+                FROM projects AS project
+                LEFT JOIN audio_assets AS audio
+                  ON audio.id = (
+                    SELECT candidate.id
+                    FROM audio_assets AS candidate
+                    WHERE candidate.project_id = project.id
+                    ORDER BY candidate.created_at DESC
+                    LIMIT 1
+                  )
+                ORDER BY project.updated_at DESC, project.created_at DESC
                 """
             ).fetchall()
         else:
             rows = connection.execute(
                 """
-                SELECT * FROM projects
-                ORDER BY updated_at DESC, created_at DESC
+                SELECT
+                  project.*,
+                  audio.id AS audio_id,
+                  audio.filename AS audio_filename,
+                  audio.content_type AS audio_content_type,
+                  audio.size_bytes AS audio_size_bytes
+                FROM projects AS project
+                LEFT JOIN LATERAL (
+                  SELECT id, filename, content_type, size_bytes
+                  FROM audio_assets
+                  WHERE project_id = project.id
+                  ORDER BY created_at DESC
+                  LIMIT 1
+                ) AS audio ON TRUE
+                ORDER BY project.updated_at DESC, project.created_at DESC
                 """
             ).fetchall()
-    return [_normalize_project(dict(row)) for row in rows]
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        project = dict(row)
+        audio_id = project.pop("audio_id")
+        audio_filename = project.pop("audio_filename")
+        audio_content_type = project.pop("audio_content_type")
+        audio_size_bytes = project.pop("audio_size_bytes")
+        normalized = _normalize_project(project)
+        normalized["audio"] = (
+            {
+                "id": UUID(str(audio_id)),
+                "filename": audio_filename,
+                "content_type": audio_content_type,
+                "size_bytes": int(audio_size_bytes),
+            }
+            if audio_id
+            else None
+        )
+        results.append(normalized)
+    return results
 
 
 def update_project_record(

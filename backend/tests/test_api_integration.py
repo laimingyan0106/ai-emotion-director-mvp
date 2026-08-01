@@ -6,6 +6,7 @@ import math
 import json
 import struct
 import zipfile
+from unittest.mock import patch
 from copy import deepcopy
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,7 @@ from uuid import UUID
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from psycopg import OperationalError
 
 
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="emotion-director-api-"))
@@ -182,6 +184,26 @@ def seed_confirmed_segment(project_id: str, duration: float = 60.0):
 
 
 class ApiIntegrationTest(unittest.TestCase):
+    def test_database_disconnect_returns_retryable_cors_response(self):
+        with TestClient(app) as client:
+            with patch.object(
+                main_module,
+                "list_project_records",
+                side_effect=OperationalError("SSL connection has been closed unexpectedly"),
+            ):
+                response = client.get(
+                    "/projects",
+                    headers={"Origin": "https://ai-emotion-director-0729.nonkxybee.chatgpt.site"},
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["retry-after"], "1")
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "https://ai-emotion-director-0729.nonkxybee.chatgpt.site",
+        )
+        self.assertIn("自动重连", response.json()["detail"])
+
     def test_release_e2e_upload_to_jianying_handoff(self):
         original_keyframe_adapter = main_module.keyframe_image_adapter
         main_module.keyframe_image_adapter = DemoKeyframeImageAdapter()
@@ -727,6 +749,17 @@ class ApiIntegrationTest(unittest.TestCase):
             self.assertEqual(snapshot["name"], "T002 integration")
             self.assertEqual(snapshot["audio"]["filename"], "sample.wav")
             self.assertEqual(snapshot["audio"]["size_bytes"], len(b"RIFF-demo-audio"))
+
+            listed = client.get("/projects")
+            self.assertEqual(listed.status_code, 200)
+            listed_project = next(
+                item for item in listed.json()["items"] if item["id"] == project_id
+            )
+            self.assertEqual(listed_project["audio"]["filename"], "sample.wav")
+            self.assertEqual(
+                listed_project["audio"]["size_bytes"],
+                len(b"RIFF-demo-audio"),
+            )
 
     def test_audio_analysis_is_real_versioned_and_cached(self):
         with TestClient(app) as client:

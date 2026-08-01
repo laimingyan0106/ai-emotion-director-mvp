@@ -123,7 +123,11 @@ export type UploadResponse = {
 };
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status?: number) {
+  constructor(
+    message: string,
+    public readonly status?: number,
+    public readonly retryable = false,
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -134,6 +138,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const AUDIO_UPLOAD_TIMEOUT_MS = 180_000;
 const AUDIO_ANALYSIS_TIMEOUT_MS = 120_000;
 const IMAGE_GENERATION_TIMEOUT_MS = 360_000;
+const SAFE_REQUEST_RETRY_DELAY_MS = 500;
+const TRANSIENT_STATUS_CODES = new Set([500, 502, 503, 504]);
 
 type RequestOptions = RequestInit & {
   timeoutMs?: number;
@@ -156,23 +162,46 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     ...requestInit
   } = init ?? {};
-  let response: Response;
-  try {
-    response = await fetch(`${configuredBaseUrl}${path}`, {
-      ...requestInit,
-      signal: requestInit.signal ?? AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "unknown network error";
-    if (
-      (error instanceof Error && error.name === "TimeoutError") ||
-      detail.toLowerCase().includes("signal timed out")
-    ) {
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  const canRetry = (method === "GET" || method === "HEAD") && !requestInit.signal?.aborted;
+  const fetchOnce = async (): Promise<Response> => {
+    try {
+      return await fetch(`${configuredBaseUrl}${path}`, {
+        ...requestInit,
+        signal: requestInit.signal ?? AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown network error";
+      if (
+        (error instanceof Error && error.name === "TimeoutError") ||
+        detail.toLowerCase().includes("signal timed out")
+      ) {
+        throw new ApiError(
+          `导演 API 处理超过 ${Math.ceil(timeoutMs / 1000)} 秒，请稍后重试；任务可能仍在服务端完成。`,
+        );
+      }
       throw new ApiError(
-        `导演 API 处理超过 ${Math.ceil(timeoutMs / 1000)} 秒，请稍后重试；任务可能仍在服务端完成。`,
+        `无法连接导演 API，请检查网络或稍后重试（${detail}）。`,
+        undefined,
+        true,
       );
     }
-    throw new ApiError(`无法连接导演 API，请检查网络或稍后重试（${detail}）。`);
+  };
+
+  let response: Response;
+  try {
+    response = await fetchOnce();
+  } catch (error) {
+    if (!(canRetry && error instanceof ApiError && error.retryable)) {
+      throw error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, SAFE_REQUEST_RETRY_DELAY_MS));
+    response = await fetchOnce();
+  }
+
+  if (canRetry && TRANSIENT_STATUS_CODES.has(response.status)) {
+    await new Promise((resolve) => window.setTimeout(resolve, SAFE_REQUEST_RETRY_DELAY_MS));
+    response = await fetchOnce();
   }
 
   if (!response.ok) {
